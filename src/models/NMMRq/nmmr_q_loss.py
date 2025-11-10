@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 from src.models.NMMRq.kernel_utils import (
+    fit_sigma,
     G_kernel,
     calculate_kernel_matrix_batched,
 )
 
 # ---------------------------------------------------------------------------
-# 2. 修改后的损失函数类 NMMR_Q_Loss
+# 2. 自定义损失函数类 NMMR_Q_Loss
 # ---------------------------------------------------------------------------
 class NMMR_Q_Loss(nn.Module):
     
@@ -72,11 +73,14 @@ class NMMR_Q_Loss(nn.Module):
                         
             # 2.b. 计算核矩阵 k_w,ij
             wx_group = torch.cat([w_group, x_group], dim=1)  # 形状 [Na, D]
+            
+            sigma_data = fit_sigma(wx_group)
                        
             k_w_matrix = calculate_kernel_matrix_batched(
                 dataset=wx_group,
                 batch_indices=(0, Na),
                 kernel=G_kernel,
+                sigma = sigma_data,
                 gamma=self.kernel_gamma,
             )
             # 预期 k_w_matrix 的形状为 [Na, Na]
@@ -89,7 +93,7 @@ class NMMR_Q_Loss(nn.Module):
             if self.use_u_statistic:
                 # --- U-statistic (公式 15) ---
                 # $\frac{1}{N_a(N_a - 1)} \sum_{i \neq j} ...$
-                k_w_matrix = k_w_matrix - k_w_matrix.diag()
+                k_w_matrix.fill_diagonal_(0)
                 loss_sum = q_minus_1.T @ k_w_matrix @ q_minus_1
                 loss_val = loss_sum / (Na * (Na - 1))
             else:

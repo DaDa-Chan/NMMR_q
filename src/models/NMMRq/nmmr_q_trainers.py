@@ -58,11 +58,13 @@ class NMMR_Q_Trainer_SGD:
             device=self.device.type,
         )
         
-        if self.log_metrics:
+        self.writer = None
+        if self.log_metrics and dump_folder is not None:
             self.writer = SummaryWriter(log_dir=op.join(dump_folder, f"tensorboard_log_{random_seed}"))
             self.causal_train_losses = []
             self.causal_val_losses = []
-            
+        else:
+            self.log_metrics = False
     # def compute_kernel(self, kernel_inputs):
     #     return calculate_kernel_matrix_batched(kernel_inputs)
     
@@ -199,58 +201,25 @@ class NMMR_Q_Trainer_SGD:
     @staticmethod
     def predict(model: NMMR_Q_common, test_dataset: 'SGDDataset'):
         """
-        使用训练好的模型计算平均处理效应 (ATE)。
-        ATE = E[Y | do(A=1)] - E[Y | do(A=0)]
-        
-        它通过在 test_dataset 的 (Z, X) 经验分布上求均值来实现:
-        E_{Z,X}[g(a, Z, X)]
-        
-        参数:
-        model (NMMR_Q_common): 训练好的模型。
-        test_dataset (SGDDataset): 用于评估的测试数据集实例。
-        
-        返回:
-        torch.Tensor: 一个包含两个元素的张量 [E[Y|do(A=0)], E[Y|do(A=1)]]。
+        按照 φ̂_U(V) = (1/n) ∑ (-1)^{1-a_i} q̂_U(V)(a_i, x_i, z_i) y_i 的形式
+        对给定数据集计算估计值。
         """
         model.eval()
-        
-        # 从数据集中获取 (Z, X) 样本
-        '''
-        使用模型参数所在设备进行 ATE 推断
-        '''
+
         model_device = next(model.parameters()).device
+        A_samples = test_dataset.A.to(model_device)
         Z_samples = test_dataset.Z.to(model_device)
         X_samples = test_dataset.X.to(model_device)
-        n_samples = Z_samples.shape[0]
-        
-        # 获取数据所在的设备
-        device = Z_samples.device
-        dtype = Z_samples.dtype
+        Y_samples = test_dataset.Y.to(model_device)
 
-        # --- 准备 do(A=0) 的输入 ---
-        # 创建一个 A=0 的张量，形状与 Z/X 匹配
-        A_zeros = torch.zeros((n_samples, 1), device=device, dtype=dtype)
-        # 拼接 (A=0, Z, X)
-        inputs_A0 = torch.cat((A_zeros, Z_samples, X_samples), dim=1)
-        
-        # --- 准备 do(A=1) 的输入 ---
-        # 创建一个 A=1 的张量
-        A_ones = torch.ones((n_samples, 1), device=device, dtype=dtype)
-        # 拼接 (A=1, Z, X)
-        inputs_A1 = torch.cat((A_ones, Z_samples, X_samples), dim=1)
+        inputs = torch.cat((A_samples, Z_samples, X_samples), dim=1)
 
-        # 计算 E_{z, x}[h(a, z, x)]
         with torch.no_grad():
-            # (n_samples, 1)
-            pred_Y_A0 = model(inputs_A0)
-            pred_Y_A1 = model(inputs_A1)
-            
-            # (scalar)
-            E_Y_do_A0 = torch.mean(pred_Y_A0)
-            E_Y_do_A1 = torch.mean(pred_Y_A1)
+            q_hat = model(inputs)
 
-        # 将两个标量结果堆叠起来
-        results = torch.stack([E_Y_do_A0, E_Y_do_A1])
-        
-        return results.cpu()
+        # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
+        signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
+        phi_hat = (signs * q_hat * Y_samples).mean()
+
+        return phi_hat.cpu()
         

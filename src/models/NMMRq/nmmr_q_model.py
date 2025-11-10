@@ -7,8 +7,8 @@ class NMMR_Q_common(nn.Module):
         super().__init__()
         
         self.train_params = train_params
-        self.network_width = train_params["newwork_width"]
-        self.network_depth = train_params["newwork_depth"]
+        self.network_width = train_params["network_width"]
+        self.network_depth = train_params["network_depth"]
 
         self.layer_list = nn.ModuleList()
         for i in range(self.network_depth):
@@ -21,9 +21,10 @@ class NMMR_Q_common(nn.Module):
     def forward(self, x):
         
         for layer in self.layer_list[:-1]:
-            x = torch.relu(layer(x))
+            x = nn.functional.leaky_relu(layer(x))
             
         x = self.layer_list[-1](x)
+        x = nn.functional.softplus(x)
                     
         return x
     

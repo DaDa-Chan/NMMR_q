@@ -78,17 +78,17 @@ def NMMR_Q_experiment(dataset_name: str,
             train_params=train_params,
             data_configs=data_configs,
             random_seed=random_seed,
-            dump_folder=dump_folder / "sgd_cv",
+            dump_folder=None,
         )
 
         print("\n===> 在 SGD CF 数据集上执行 cross fitting")
-        potential_outcomes, ate_values = _run_cross_fitting(
+        ate_estimate, ate_values = _run_cross_fitting(
             dataset=cf_dataset,
             n_splits=n_splits,
             train_params=train_params,
             data_configs=data_configs,
             random_seed=random_seed,
-            dump_folder=dump_folder / "sgd_cf",
+            dump_folder=None,
             tag="sgd_cf",
         )
 
@@ -104,32 +104,22 @@ def NMMR_Q_experiment(dataset_name: str,
         )
 
         print("\n===> 在 RHC 数据集上执行 cross fitting (无 CV)")
-        potential_outcomes, ate_values = _run_cross_fitting(
+        ate_estimate, ate_values = _run_cross_fitting(
             dataset=cf_dataset,
             n_splits=n_splits,
             train_params=train_params,
             data_configs=data_configs,
             random_seed=random_seed,
-            dump_folder=dump_folder / "rhc_cf",
+            dump_folder=None,
             tag="rhc_cf",
         )
 
     else:
         raise ValueError(f"未知的数据集: {dataset_name}")
 
-    ate = potential_outcomes[1] - potential_outcomes[0]
-
-    print(f"\n--- 最终结果 (Seed {random_seed}) ---")
-    print(f"E[Y|do(A=0)] = {potential_outcomes[0].item():.4f}")
-    print(f"E[Y|do(A=1)] = {potential_outcomes[1].item():.4f}")
-    print(f"ATE (1 - 0)  = {ate.item():.4f}")
+    print(f"\n--- 最终 ATE (Seed {random_seed}) ---")
+    print(f"ATE = {ate_estimate.item():.4f}")
     print("----------------------------------")
-
-    pred_path = dump_folder / f"{dataset_key}_{random_seed}.pred.txt"
-    with open(pred_path, 'w') as f:
-        f.write(f"E[Y|do(A=0)]: {potential_outcomes[0].item()}\n")
-        f.write(f"E[Y|do(A=1)]: {potential_outcomes[1].item()}\n")
-        f.write(f"ATE: {ate.item()}\n")
 
 
 def _run_cross_validation(dataset,
@@ -137,11 +127,10 @@ def _run_cross_validation(dataset,
                           train_params: Dict[str, Any],
                           data_configs: Dict[str, Any],
                           random_seed: int,
-                          dump_folder: Path):
+                          dump_folder: Optional[Path]):
     """
     在给定数据集上执行 K-fold 交叉验证，仅用于 SGD 训练集。
     """
-    dump_folder.mkdir(parents=True, exist_ok=True)
     batch_size = train_params['batch_size']
     cv_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
     val_losses: List[float] = []
@@ -149,8 +138,10 @@ def _run_cross_validation(dataset,
 
     for fold_idx, (train_idx, val_idx) in enumerate(cv_kfold.split(np.arange(len(dataset))), start=1):
         print(f"\n[CV] Fold {fold_idx}/{n_splits}")
-        fold_folder = dump_folder / f"fold_{fold_idx}"
-        fold_folder.mkdir(parents=True, exist_ok=True)
+        fold_folder = None
+        if dump_folder is not None:
+            fold_folder = dump_folder / f"fold_{fold_idx}"
+            fold_folder.mkdir(parents=True, exist_ok=True)
 
         trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder)
 
@@ -188,15 +179,14 @@ def _run_cross_fitting(dataset,
                        train_params: Dict[str, Any],
                        data_configs: Dict[str, Any],
                        random_seed: int,
-                       dump_folder: Path,
+                       dump_folder: Optional[Path],
                        tag: str) -> Tuple[torch.Tensor, List[float]]:
     """
     对任意数据集执行 cross fitting:
     - 将数据划分为 n_splits 折
     - 在每折上训练模型（fold 内部再 8:2 划分 train/val）
-    - 在其余折上计算 ATE_i，最后平均
+    - 在其余折上直接计算 ATE_i，最后求均值
     """
-    dump_folder.mkdir(parents=True, exist_ok=True)
     batch_size = train_params['batch_size']
     cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
 
@@ -208,8 +198,10 @@ def _run_cross_fitting(dataset,
         train_fold_indices = eval_idx.tolist()   # 当前折用于训练
         eval_fold_indices = train_idx.tolist()   # 剩余样本用于计算 ATE
 
-        fold_folder = dump_folder / f"fold_{fold_idx}"
-        fold_folder.mkdir(parents=True, exist_ok=True)
+        fold_folder = None
+        if dump_folder is not None:
+            fold_folder = dump_folder / f"fold_{fold_idx}"
+            fold_folder.mkdir(parents=True, exist_ok=True)
 
         trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder)
 
@@ -222,9 +214,9 @@ def _run_cross_fitting(dataset,
         model = trainer.train(train_loader, val_loader)
 
         eval_view = _build_dataset_view(dataset, eval_fold_indices)
-        fold_po = trainer.predict(model, eval_view)
-        fold_predictions.append(fold_po)
-        ate_values.append((fold_po[1] - fold_po[0]).item())
+        fold_ate = trainer.predict(model, eval_view)
+        fold_predictions.append(fold_ate)
+        ate_values.append(fold_ate.item())
 
         # model_save_path = fold_folder / f"trained_model_seed_{random_seed}_fold_{fold_idx}.pth"
         # try:
@@ -240,9 +232,9 @@ def _run_cross_fitting(dataset,
     if not fold_predictions:
         raise RuntimeError("Cross-fitting 阶段未生成任何预测结果。")
 
-    potential_outcomes = torch.stack(fold_predictions).mean(dim=0)
-    print(f"[CF-{tag}] 平均 ATE: {np.mean(ate_values):.6f}")
-    return potential_outcomes, ate_values
+    ate_tensor = torch.stack(fold_predictions).mean()
+    print(f"[CF-{tag}] 平均 ATE: {ate_tensor.item():.6f}")
+    return ate_tensor, ate_values
 
 
 def _create_trainer(data_configs, train_params, random_seed, dump_folder):

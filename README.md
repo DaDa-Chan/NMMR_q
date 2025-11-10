@@ -15,7 +15,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> 依赖包含 PyTorch、scikit-learn、tensorboard、tqdm 等，确保使用 Python 3.10+。
+> 依赖包含 PyTorch、scikit-learn、tensorboard、tqdm 等，确保使用 Python 3.10+。本项目使用Python 3.11.14
 
 ### 2. 数据放置
 
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 python src/experiment.py \
   --dataset_name sgd \
   --model_name nmmr_q \
-  --config_path configs/nmmr_q_v_sgd.json \
+  --config_path configs/nmmr_q_u_sgd.json \
   --dump_folder results
 
 # 在 RHC 数据上进行 cross fitting
@@ -50,3 +50,17 @@ python src/experiment.py \
 3. 在 `results/<dataset>/<model>/<config>/<seed>/` 下保存日志与 `*.pred.txt`（包含 `E[Y|do(A=0/1)]` 与最终 ATE）。
 
 如需调整折数、学习率等，可在配置文件 `train_params` 中修改相应字段 (`n_splits`, `learning_rate`, `batch_size` 等)。更多实验或数据脚本可参考 `src/data/ate` 与 `src/models/NMMRq`。
+
+### 4. 打开 TensorBoard
+
+若在配置中将 `log_metrics` 设为 `"True"` 并提供 `--dump_folder`，训练时会在 `results/<dataset>/<model>/<config>/<seed>/tensorboard_log_<seed>/` 下生成事件文件。可用以下步骤查看：
+
+```bash
+# 切换到项目根目录
+cd /Path/to/NMMR_q
+
+# 指定 logdir 指向保存日志的目录，示例为 SGD 运行的某个随机种子
+tensorboard --logdir results/sgd/nmmr_q/nmmr_q_v_sgd/42/tensorboard_log_42 --port 6006
+```
+
+启动后在浏览器打开 `http://localhost:6006` 即可查看损失曲线与其他标量。若存在多个实验，可将 `--logdir` 指向更高层目录（如 `results/sgd/nmmr_q`）从而对比不同配置。
