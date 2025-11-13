@@ -66,12 +66,11 @@ class NMMR_Q_Loss(nn.Module):
             
             Na = q_group.shape[0]
 
-            # 2. 准备公式 (13) 中的各项
             
-            # 2.a. 计算 (q_a(Z_i, X_i) - 1)
+            # 计算 (q_a(Z_i, X_i) - 1)
             q_minus_1 = q_group - 1.0  # 形状 [Na, 1]
                         
-            # 2.b. 计算核矩阵 k_w,ij
+            # 计算核矩阵 k_w,ij
             wx_group = torch.cat([w_group, x_group], dim=1)  # 形状 [Na, D]
             
             sigma_data = fit_sigma(wx_group)
@@ -83,21 +82,21 @@ class NMMR_Q_Loss(nn.Module):
                 sigma = sigma_data,
                 gamma=self.kernel_gamma,
             )
-            # 预期 k_w_matrix 的形状为 [Na, Na]
+            # k_w_matrix 的形状为 [Na, Na]
             # ---------------------------------------------------------------
 
-            # 3. 计算最终的损失值 (V-statistic 或 U-statistic)
+            # 计算最终的损失值 (V-statistic 或 U-statistic)
             
             # 矩阵中 (i, j) 元素 = (q_a(i)-1)(q_a(j)-1) * k_w(i,j)
             
             if self.use_u_statistic:
-                # --- U-statistic (公式 15) ---
+                # --- U-statistic---
                 # $\frac{1}{N_a(N_a - 1)} \sum_{i \neq j} ...$
                 k_w_matrix.fill_diagonal_(0)
                 loss_sum = q_minus_1.T @ k_w_matrix @ q_minus_1
                 loss_val = loss_sum / (Na * (Na - 1))
             else:
-                # --- V-statistic (公式 14) ---
+                # --- V-statistic---
                 # $\frac{1}{N_a^2} \sum_{i, j} ...$
                 loss_sum = q_minus_1.T @ k_w_matrix @ q_minus_1
                 loss_val = loss_sum / (Na * Na)

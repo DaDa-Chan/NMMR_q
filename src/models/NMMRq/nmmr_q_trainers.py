@@ -95,12 +95,12 @@ class NMMR_Q_Trainer_SGD:
 
         model = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
 
-        # 假设: SGDDataset 已经将数据放到了正确的设备上 (cpu or cuda)
-        # 我们只需要将模型移动到该设备
+        # SGDDataset 已经将数据放到了正确的设备上 (cpu or cuda)
+        # 将模型移动到该设备
         if self.gpu_flg:
             model.cuda()
 
-        # weight_decay 实现 L2 惩罚
+        # weight_decay  L2 惩罚
         optimizer = optim.Adam(list(model.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
 
         print(f"开始训练 NMMR_Q模型, 输入维度: {input_size}")
@@ -113,7 +113,7 @@ class NMMR_Q_Trainer_SGD:
             for batch_data in train_loader:
                 
                 # --- 从字典中解包数据 ---
-                # 假设数据已在 SGDDataset 的 __init__ 中被移动到正确设备
+                # 数据已在 SGDDataset 的 __init__ 中被移动到正确设备
                 '''
                 批次迁移到目标设备，确保与模型一致
                 '''
@@ -182,8 +182,8 @@ class NMMR_Q_Trainer_SGD:
                     preds_val = model(torch.cat((val_A, val_Z, val_X), dim=1))
                     
                     # "观测" MSE (非因果)
-                    mse_val = self.mse_loss(preds_val, val_Y)
-                    self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
+                    #mse_val = self.mse_loss(preds_val, val_Y)
+                    #self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
 
                     # 因果损失
                     causal_loss_val_full, _ = self.q_loss(
@@ -212,13 +212,17 @@ class NMMR_Q_Trainer_SGD:
         X_samples = test_dataset.X.to(model_device)
         Y_samples = test_dataset.Y.to(model_device)
 
+        # inputs_A0 = torch.cat((torch.zeros_like(A_samples), Z_samples, X_samples), dim=1)
+        # inputs_A1 = torch.cat((torch.ones_like(A_samples), Z_samples, X_samples), dim=1)
         inputs = torch.cat((A_samples, Z_samples, X_samples), dim=1)
-
         with torch.no_grad():
+            # q_hat_0 = model(inputs_A0)
+            # q_hat_1 = model(inputs_A1)
             q_hat = model(inputs)
 
         # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
+        # phi_hat_counter = (q_hat_1 * Y_samples - q_hat_0 * Y_samples).mean()
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()

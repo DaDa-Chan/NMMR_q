@@ -11,15 +11,15 @@ def fit_sigma(data: torch.Tensor, scale: float = 1.0) -> float:
     Returns:
         计算得到的 sigma。
     """
-    # 1. 计算所有样本间的两两欧几里得距离
+    # 计算所有样本间的两两欧几里得距离
     #    使用 torch.pdist 获取一个包含 N*(N-1)/2 个距离的向量，
     dists = torch.pdist(data, p=2.0)
     
-    # 2. 找到距离的中位数
-    #    + 1e-5 是为了防止中位数为0导致除零错误
+    # 找到距离的中位数
+    #    + 1e-5 防止中位数为0导致除零错误
     median_dist = torch.median(dists) + 1e-5
 
-    # 3. 计算 sigma
+    # 计算 sigma
     sigma = 2.0 * (median_dist ** 2) * scale
     
     return sigma.item()

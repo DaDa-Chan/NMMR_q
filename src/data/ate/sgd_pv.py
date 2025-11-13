@@ -11,7 +11,7 @@ def generate_data(n_samples=2000):
     X = np.random.multivariate_normal(gamma_x, cov_x, n_samples)
 
     # -- A --
-    p_a = 1 / (1 + np.exp(-(0.125 * X[:, 0] + 0.125 * X[:, 1])))
+    p_a = 1 / (1 + np.exp((0.125 * X[:, 0] + 0.125 * X[:, 1])))
     A = np.random.binomial(1, p_a, n_samples)
 
     mean_zwu = np.zeros((n_samples, 3))
@@ -40,7 +40,8 @@ def generate_data(n_samples=2000):
     
     return pd.DataFrame({'X1': X[:, 0], 'X2': X[:, 1], 'A': A, 'Z': Z, 'W': W, 'U': U, 'Y': Y})
 
-n_train = 10000
+"""
+ n_train = 10000
 train_df = generate_data(n_samples=n_train)
 n_cf = 10000
 cf_df = generate_data(n_samples=n_cf)
@@ -52,6 +53,8 @@ sgd_cf = output_dir / 'sgd_cf.csv'
 
 train_df.to_csv(sgd_train, index=False)
 cf_df.to_csv(sgd_cf, index=False)
+ """
+
 
 
 

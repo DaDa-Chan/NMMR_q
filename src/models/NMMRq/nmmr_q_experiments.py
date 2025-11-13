@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
 from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer_SGD
+from src.data.ate.sgd_pv import generate_data
 from src.data.ate.data_class import SGDDataset, RHCDataset
 
 
@@ -51,7 +52,21 @@ def NMMR_Q_experiment(dataset_name: str,
     n_splits = int(train_params.get('n_splits', 5))
 
     if dataset_key == 'sgd':
+        
         data_base_path = Path(data_configs['data_path'])
+        
+        n = 10000
+        train_df = generate_data(n_samples=n)
+        cf_df = generate_data(n_samples=n)
+
+        output_dir = data_base_path
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sgd_train = output_dir / 'sgd_train.csv'
+        sgd_cf = output_dir / 'sgd_cf.csv'
+
+        train_df.to_csv(sgd_train, index=False)
+        cf_df.to_csv(sgd_cf, index=False)
+        
         train_path = _locate_split_file(
             data_base_path,
             data_configs.get('train_file'),
@@ -78,7 +93,7 @@ def NMMR_Q_experiment(dataset_name: str,
             train_params=train_params,
             data_configs=data_configs,
             random_seed=random_seed,
-            dump_folder=None,
+            dump_folder=dump_folder,
         )
 
         print("\n===> 在 SGD CF 数据集上执行 cross fitting")
@@ -88,7 +103,7 @@ def NMMR_Q_experiment(dataset_name: str,
             train_params=train_params,
             data_configs=data_configs,
             random_seed=random_seed,
-            dump_folder=None,
+            dump_folder=dump_folder,
             tag="sgd_cf",
         )
 
@@ -218,12 +233,7 @@ def _run_cross_fitting(dataset,
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
 
-        # model_save_path = fold_folder / f"trained_model_seed_{random_seed}_fold_{fold_idx}.pth"
-        # try:
-        #     torch.save(model.state_dict(), model_save_path)
-        #     print(f"[CF-{tag}] 模型保存于: {model_save_path}")
-        # except Exception as e:
-        #     print(f"[CF-{tag}] 警告: 无法保存模型。错误: {e}")
+
 
         del model
         if torch.cuda.is_available():

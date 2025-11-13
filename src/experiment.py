@@ -18,7 +18,7 @@ if str(project_root) not in sys.path:
 # 导入新的实验函数
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment
 
-# (这里也可以导入其他实验，例如 NMMR_experiment, naive_nn_experiment 等)
+
 
 
 def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
@@ -33,12 +33,12 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
     with open(config_path, 'r') as f:
         config_json = json.load(f)
     
-    # 1. 加载特定数据集的配置
+    # 加载特定数据集的配置
     if dataset_name not in config_json['data_configs']:
         raise KeyError(f"在 {config_path} 中未找到数据集 '{dataset_name}' 的配置。")
     data_configs = config_json['data_configs'][dataset_name]
 
-    # 2. 加载训练参数
+    # 加载训练参数
     train_params = config_json['train_params']
     
     return data_configs, train_params
@@ -94,17 +94,17 @@ def main():
     
     args = parser.parse_args()
 
-    # 1. 加载配置
+    # 加载配置
     print(f"加载配置: {args.config_path}")
     data_configs, train_params = load_configs(args.config_path, args.dataset_name)
 
-    # 2. 创建结果文件夹
+    # 创建结果文件夹
     config_name = Path(args.config_path).stem  # 例如 'nmmr_q_sgd_config'
     experiment_dump_folder = Path(args.dump_folder) / args.dataset_name / args.model_name / config_name
     
     print(f"结果将保存到: {experiment_dump_folder}")
 
-    # 3. 循环运行多个随机种子
+    # 循环运行多个随机种子
     for i in range(args.n_seeds):
         random_seed = i
         print(f"\n--- 开始运行 Seed {random_seed + 1} / {args.n_seeds} ---")
@@ -125,10 +125,7 @@ def main():
                 dump_folder=seed_dump_folder,
                 random_seed=random_seed
             )
-        # elif args.model_name == 'naive_nn':
-        #     run_naive_nn_experiment(...)
-        # elif ...
-        
+
         else:
             print(f"警告: 未知的模型名称 '{args.model_name}'。跳过。")
             
