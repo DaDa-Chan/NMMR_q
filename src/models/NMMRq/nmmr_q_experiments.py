@@ -136,15 +136,17 @@ def _run_optuna_tuning(
             
             except Exception as e:
                 print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
-                # 发生错误（例如 NaN 
-                # loss）时，返回一个极差的值
                 return float("inf")
             
             finally:
-                # 清理内存
-                del model, trainer, train_loader, val_loader
+                if 'model' in locals():
+                    del model
+                if 'trainer' in locals():
+                    del trainer
+                del train_loader, val_loader
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+
 
         # 返回 K-fold 的平均验证损失
         avg_val_loss = np.mean(fold_val_losses)
@@ -206,6 +208,7 @@ def _run_cross_fitting(dataset,
         model = trainer.train(train_loader, val_loader)
 
         eval_view = _build_dataset_view(dataset, eval_fold_indices)
+        
         fold_ate = trainer.predict(model, eval_view)
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
@@ -295,7 +298,7 @@ def _evaluate_q_loss(trainer,
                      dataset,
                      indices: List[int]) -> float:
     """
-    计算指定子集上的 q-loss（用于交叉验证评分）。
+    计算指定子集上的 q-loss 用于交叉验证评分。
     """
     view = _build_dataset_view(dataset, indices)
     with torch.no_grad():
@@ -304,8 +307,7 @@ def _evaluate_q_loss(trainer,
         X = view.X.to(trainer.device)
         Z = view.Z.to(trainer.device)
         
-        inputs = torch.cat((A, Z, X), dim=1)
-        preds = model(inputs)
+        preds = model(z=Z, x=X, a=A)
         loss, _ = trainer.q_loss(q_a_hat=preds, a=A, w=W, x=X)
     return float(loss.item())
 
