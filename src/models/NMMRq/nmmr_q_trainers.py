@@ -14,7 +14,7 @@ from src.data.ate.data_class import SGDDataset, RHCDataset
 # from torch.utils.data import DataLoader
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
-# from src.models.NMMRq.kernel_utils import calculate_kernel_matrix_batched
+from src.models.NMMRq.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 
 
 def _resolve_dataset(dataset):
@@ -66,14 +66,10 @@ class NMMR_Q_Trainer_SGD:
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
         self.scaler = GradScaler() if self.gpu_flg else None
-        '''
-        记录设备信息并实例化 q-损失，确保与 kernel/loss 配置一致
-        '''
+        self.kernel_gamma = train_params['kernel_gamma']
         self.device = torch.device('cuda' if self.gpu_flg else 'cpu')
         self.q_loss = NMMR_Q_Loss(
-            kernel_gamma=self.train_params.get('kernel_gamma', 1.0),
             use_u_statistic=self.train_params.get('use_u_statistic', False),
-            device=self.device.type,
         )
         
         self.writer = None
@@ -83,24 +79,33 @@ class NMMR_Q_Trainer_SGD:
             self.causal_val_losses = []
         else:
             self.log_metrics = False
-    # def compute_kernel(self, kernel_inputs):
-    #     return calculate_kernel_matrix_batched(kernel_inputs)
+
+    def _compute_kernel_matrix(self, w, x):
+        """
+        辅助函数：计算全 Batch 的核矩阵
+        输入: w [N, w_dim], x [N, x_dim]
+        输出: K [N, N]
+        """
+        N = w.shape[0]
+        wx_group = torch.cat([w, x], dim=1)  # [N, D]
+        sigma_data = fit_sigma(wx_group)
+        
+        # 使用 kernel_utils 中的函数计算全矩阵
+        k_matrix = calculate_kernel_matrix_batched(
+            dataset=wx_group,
+            batch_indices=(0, N),
+            kernel=G_kernel,
+            sigma=sigma_data,
+            gamma=self.kernel_gamma,
+        )
+        return k_matrix
     
     def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int = 0) -> NMMR_Q_common:
         """
         训练NMMR_Q 模型。
         q0(Z, X) & q1(Z, X)
-        
-        参数:
-        train_loader (DataLoader): 包含 SGDDataset 的训练数据加载器。
-        val_loader (DataLoader): 包含 SGDDataset 的验证数据加载器。
-        verbose (int): 日志详细程度 (0 = 安静)。
-        
-        返回:
-        NMMR_Q_common: 训练好的模型。
         """
         
-        # 从DataLoader访问底层的Dataset
         train_dataset, train_indices = _resolve_dataset(train_loader.dataset)
         val_dataset, val_indices = _resolve_dataset(val_loader.dataset)
 
@@ -113,8 +118,7 @@ class NMMR_Q_Trainer_SGD:
 
         model0 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
         model1 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
-        # 假设: SGDDataset 已经将数据放到了正确的设备上 (cpu or cuda)
-        # 我们只需要将模型移动到该设备
+
         if self.gpu_flg:
             model0.cuda()
             model1.cuda()
@@ -133,15 +137,16 @@ class NMMR_Q_Trainer_SGD:
             
             # DataLoader 循环
             for batch_data in train_loader:
-                
-                '''
-                批次迁移到目标设备，确保与模型一致
-                '''
+
                 batch_A = batch_data['A'].to(self.device)
                 batch_W = batch_data['W'].to(self.device)
                 batch_Z = batch_data['Z'].to(self.device)
                 batch_X = batch_data['X'].to(self.device)
 
+                with torch.no_grad():
+                    kernel_matrix = self._compute_kernel_matrix(batch_W, batch_X)
+                
+                
                 # --- 分割数据分别训练 ---
                 mask0 = (batch_A < 0.5).squeeze()
                 if mask0.sum() > 1:
@@ -149,11 +154,10 @@ class NMMR_Q_Trainer_SGD:
                     inputs0 = torch.cat((batch_Z[mask0], batch_X[mask0]), dim=1)
                     with autocast(enabled=self.gpu_flg): 
                         pred0 = model0(inputs0)
-                        loss0, _ = self.q_loss(
-                            q_a_hat=pred0,
-                            a=batch_A[mask0],
-                            w=batch_W[mask0],
-                            x=batch_X[mask0]
+                        loss0 = self.q_loss(
+                            q_pred_sub=pred0,
+                            mask_sub=mask0,
+                            kernel_matrix=kernel_matrix
                         )
                     if self.scaler:
                         self.scaler.scale(loss0).backward()
@@ -169,11 +173,10 @@ class NMMR_Q_Trainer_SGD:
                     inputs1 = torch.cat((batch_Z[mask1], batch_X[mask1]), dim=1)
                     with autocast(enabled=self.gpu_flg): 
                         pred1 = model1(inputs1)
-                        loss1, _ = self.q_loss(
-                            q_a_hat=pred1,
-                            a=batch_A[mask1],
-                            w=batch_W[mask1],
-                            x=batch_X[mask1]
+                        loss1 = self.q_loss(
+                            q_pred_sub=pred1,
+                            mask_sub=mask1,
+                            kernel_matrix=kernel_matrix
                         )
                     if self.scaler:
                         self.scaler.scale(loss1).backward()
@@ -190,52 +193,61 @@ class NMMR_Q_Trainer_SGD:
                 model1.eval()
                 with torch.no_grad():
                     # --- 在整个训练集上评估 ---
-                    '''
-                    全量训练集迁移到设备做度量
-                    '''
+
                     train_A = _select_rows(train_dataset.A, train_indices).to(self.device)
                     train_W = _select_rows(train_dataset.W, train_indices).to(self.device)
                     train_Z = _select_rows(train_dataset.Z, train_indices).to(self.device)
                     train_X = _select_rows(train_dataset.X, train_indices).to(self.device)
-                    train_Y = _select_rows(train_dataset.Y, train_indices).to(self.device)
                     
-                    inputs_train = torch.cat((train_Z, train_X), dim=1)
-                    out0_train = model0(inputs_train)
-                    out1_train = model1(inputs_train)
-                    preds_train = torch.where(train_A > 0.5, out1_train, out0_train)
+                    k_train = self._compute_kernel_matrix(train_W, train_X)
+            
+                    mask0_train = (train_A < 0.5).squeeze()
+                    if mask0_train.sum() > 0:
+                        input0 = torch.cat((train_Z[mask0_train], train_X[mask0_train]), dim=1)
+                        p0 = model0(input0)
+                        loss0_train = self.q_loss(p0, mask0_train, k_train)
+                    else:
+                        loss0_train = 0.0
+
+                    mask1_train = (train_A > 0.5).squeeze()
+                    if mask1_train.sum() > 0:
+                        input1 = torch.cat((train_Z[mask1_train], train_X[mask1_train]), dim=1)
+                        p1 = model1(input1)
+                        loss1_train = self.q_loss(p1, mask1_train, k_train)
+                    else:
+                        loss1_train = 0.0
                     
                     # 因果损失
-                    causal_loss_train_full, _ = self.q_loss(
-                        q_a_hat=preds_train,
-                        a=train_A,
-                        w=train_W,
-                        x=train_X,
-                    )
-                    self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train_full, epoch)
-                    self.causal_train_losses.append(causal_loss_train_full.item()) # .item()
+                    total_train_loss = loss0_train + loss1_train
                     
-                    # --- 在整个验证集上评估 ---
-                    '''
-                    全量验证集迁移到设备做度量
-                    '''
+                    self.writer.add_scalar(f'{self.loss_name}/train', total_train_loss, epoch)
+                    self.causal_train_losses.append(total_train_loss.item()) # .item()
+                    
+
                     val_A = _select_rows(val_dataset.A, val_indices).to(self.device)
                     val_W = _select_rows(val_dataset.W, val_indices).to(self.device)
                     val_Z = _select_rows(val_dataset.Z, val_indices).to(self.device)
                     val_X = _select_rows(val_dataset.X, val_indices).to(self.device)
                     
-                    inputs_val = torch.cat((val_Z, val_X), dim=1)
-                    out0_val = model0(inputs_val)
-                    out1_val = model1(inputs_val)
-                    preds_val = torch.where(val_A > 0.5, out1_val, out0_val)
+                    k_val = self._compute_kernel_matrix(val_W, val_X)
                     
+                    mask0_val = (val_A < 0.5).squeeze()
+                    if mask0_val.sum() > 0:
+                        input0 = torch.cat((val_Z[mask0_val], val_X[mask0_val]), dim=1)
+                        p0 = model0(input0)
+                        loss0_val = self.q_loss(p0, mask0_val, k_val)
+                    else:
+                        loss0_val = 0.0
 
-                    # 因果损失
-                    causal_loss_val_full, _ = self.q_loss(
-                        q_a_hat=preds_val,
-                        a=val_A,
-                        w=val_W,
-                        x=val_X,
-                    )
+                    mask1_val = (val_A > 0.5).squeeze()
+                    if mask1_val.sum() > 0:
+                        input1 = torch.cat((train_Z[mask1_val], train_X[mask1_val]), dim=1)
+                        p1 = model1(input1)
+                        loss1_val = self.q_loss(p1, mask1_val, k_val)
+                    else:
+                        loss1_val = 0.0
+                    causal_loss_val_full = loss0_val + loss1_val   
+                    
                     self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val_full, epoch)
                     self.causal_val_losses.append(causal_loss_val_full.item()) # .item()
 
@@ -256,17 +268,13 @@ class NMMR_Q_Trainer_SGD:
         X_samples = dataset_view.X.to(model_device)
         Y_samples = dataset_view.Y.to(model_device)
 
-        #inputs_A0 = torch.cat((Z_samples, X_samples, torch.zeros_like(A_samples)), dim=1)
-        #inputs_A1 = torch.cat((Z_samples, X_samples, torch.ones_like(A_samples)), dim=1)
-        
         with torch.no_grad():
-            #q_hat_0 = model(inputs_A0)
-            #q_hat_1 = model(inputs_A1)
+
             q_hat = model(Z_samples, X_samples, A_samples)
 
         # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
-        #phi_hat_counter = (q_hat_1 * Y_samples - q_hat_0 * Y_samples).mean()
+
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()

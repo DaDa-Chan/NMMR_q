@@ -307,9 +307,28 @@ def _evaluate_q_loss(trainer,
         X = view.X.to(trainer.device)
         Z = view.Z.to(trainer.device)
         
-        preds = model(z=Z, x=X, a=A)
-        loss, _ = trainer.q_loss(q_a_hat=preds, a=A, w=W, x=X)
-    return float(loss.item())
+        k_matrix = trainer._compute_kernel_matrix(W, X)
+        loss_total = 0.0
+        
+        # Loss 0
+        mask0 = (A < 0.5).squeeze()
+        if mask0.sum() > 0:
+            # 从 DualModel 中提取 net0
+            # 注意：model 是 NMMR_Q_DualModel
+            inputs0 = torch.cat((Z[mask0], X[mask0]), dim=1)
+            pred0 = model.net0(inputs0)
+            loss0 = trainer.q_loss(pred0, mask0, k_matrix)
+            loss_total += loss0
+            
+        # Loss 1
+        mask1 = (A > 0.5).squeeze()
+        if mask1.sum() > 0:
+            inputs1 = torch.cat((Z[mask1], X[mask1]), dim=1)
+            pred1 = model.net1(inputs1)
+            loss1 = trainer.q_loss(pred1, mask1, k_matrix)
+            loss_total += loss1
+
+    return float(loss_total.item())
 
 
 def NMMR_Q_experiment(dataset_name: str,

@@ -1,112 +1,44 @@
 import torch
 import torch.nn as nn
-from src.models.NMMRq.kernel_utils import (
-    fit_sigma,
-    G_kernel,
-    calculate_kernel_matrix_batched,
-)
+
 
 # ---------------------------------------------------------------------------
-# 2. 自定义损失函数类 NMMR_Q_Loss
+# 自定义损失函数类 NMMR_Q_Loss
 # ---------------------------------------------------------------------------
 class NMMR_Q_Loss(nn.Module):
     
     
     def __init__(self, 
-                 kernel_gamma=1.0, 
-                 use_u_statistic=False,
-                 device='cpu'):
-        """
-        初始化损失函数
-        
-        参数:
-        kernel_gamma (float): RBF 核 k_w 的 gamma 参数。
-        use_u_statistic (bool): 
-            - False (默认): 使用 V-statistic，包含对角线。
-            - True: 使用 U-statistic，不包含对角线。
-        device (str): 'cpu' 或 'cuda'
-        """
+                 use_u_statistic=False):
         super(NMMR_Q_Loss, self).__init__()
-        self.kernel_gamma = kernel_gamma
         self.use_u_statistic = use_u_statistic
-        self.device = device
 
-    def forward(self, q_a_hat, a, w, x):
-        """
-        计算损失函数的前向传播
-        
-        参数:
-        q_a_hat (torch.Tensor): q 网络的输出 q(Z, A, X)，形状 [batch_size, 1]
-        a (torch.Tensor): 处理变量，形状 [batch_size, 1]
-        z (torch.Tensor): 结局代理变量，形状 [batch_size, z_dim]
-        w (torch.Tensor): 处理代理变量，形状 [batch_size, w_dim]
-        x (torch.Tensor): 协变量，形状 [batch_size, x_dim]
-        
-        返回:
-        torch.Tensor: 计算得到的标量损失值
-        dict: 包含损失详情的字典
-        """
-        
-        total_loss = 0.0
-        
-        # 我们需要分别计算 A=0 和 A=1 时的损失，然后相加
-        for a_val in [0.0, 1.0]:
-            
-            # 1. 筛选出当前处理组 (A=a) 的数据
-            indices = (a == a_val).squeeze()
-            
-            # 如果当前批次中没有这个组的数据，跳过
-            if indices.sum() < 2:  # U-statistic 至少需要2个样本
-                continue
-                
-            # 提取对应组的数据
-            q_group = q_a_hat[indices]  # 形状 [Na, 1]
-            w_group = w[indices]        # 形状 [Na, z_dim]
-            x_group = x[indices]        # 形状 [Na, x_dim]
-            
-            Na = q_group.shape[0]
+    def forward(self, q_pred_sub, mask_sub, kernel_matrix):
 
-            
-            # 计算 (q_a(Z_i, X_i) - 1)
-            q_minus_1 = q_group - 1.0  # 形状 [Na, 1]
-                        
-            # 计算核矩阵 k_w,ij
-            wx_group = torch.cat([w_group, x_group], dim=1)  # 形状 [Na, D]
-            
-            sigma_data = fit_sigma(wx_group)
-                       
-            k_w_matrix = calculate_kernel_matrix_batched(
-                dataset=wx_group,
-                batch_indices=(0, Na),
-                kernel=G_kernel,
-                sigma = sigma_data,
-                gamma=self.kernel_gamma,
-            )
-            # k_w_matrix 的形状为 [Na, Na]
-            # ---------------------------------------------------------------
+        
+        N = kernel_matrix.shape[0]
+        
+        residuals = torch.full((N, 1), -1.0, device=kernel_matrix.device, dtype=kernel_matrix.dtype)
+        
+        # 更新目标组 (A = a) 的残差为 q - 1.0
+        # 注意: q_pred_sub 形状需为 [N_sub, 1]
+        if mask_sub.sum() > 0:
+            residuals[mask_sub] = q_pred_sub - 1.0
 
-            # 计算最终的损失值 (V-statistic 或 U-statistic)
-            
-            # 矩阵中 (i, j) 元素 = (q_a(i)-1)(q_a(j)-1) * k_w(i,j)
-            
-            if self.use_u_statistic:
-                # --- U-statistic---
-                # $\frac{1}{N_a(N_a - 1)} \sum_{i \neq j} ...$
-                k_w_matrix.fill_diagonal_(0)
-                loss_sum = q_minus_1.T @ k_w_matrix @ q_minus_1
-                loss_val = loss_sum / (Na * (Na - 1))
+        
+        if self.use_u_statistic:
+
+            kernel_matrix_na = kernel_matrix.fill_diagonal_(0)
+            loss_sum = residuals.T @ kernel_matrix_na @ residuals
+
+            if N > 1:
+                loss_val = loss_sum / (N * (N - 1))
             else:
-                # --- V-statistic---
-                # $\frac{1}{N_a^2} \sum_{i, j} ...$
-                loss_sum = q_minus_1.T @ k_w_matrix @ q_minus_1
-                loss_val = loss_sum / (Na * Na)
+                loss_val = torch.tensor(0.0, device=kernel_matrix.device)
+                
+        else:
+
+            loss_sum = residuals.T @ kernel_matrix @ residuals
+            loss_val = loss_sum / (N * N)
             
-            # 累加 A=0 和 A=1 的损失
-            total_loss += loss_val
-        
-        loss_dict = {
-            'q_moment_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-            'total_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
-        }
-        
-        return total_loss, loss_dict
+        return loss_val
