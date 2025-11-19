@@ -241,7 +241,7 @@ class NMMR_Q_Trainer_SGD:
 
                     mask1_val = (val_A > 0.5).squeeze()
                     if mask1_val.sum() > 0:
-                        input1 = torch.cat((train_Z[mask1_val], train_X[mask1_val]), dim=1)
+                        input1 = torch.cat((val_Z[mask1_val], val_X[mask1_val]), dim=1)
                         p1 = model1(input1)
                         loss1_val = self.q_loss(p1, mask1_val, k_val)
                     else:
