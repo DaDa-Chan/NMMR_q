@@ -20,9 +20,7 @@ class NMMR_Q_common(nn.Module):
         self.initialize_weights()
         
     def initialize_weights(self):
-        # 遍历模型中的所有层
         for layer in self.layer_list:
-            # 检查这一层是不是一个线性层 (nn.Linear)
             if isinstance(layer, nn.Linear):
             # 初始化权重 (Weight)
                 torch.nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')

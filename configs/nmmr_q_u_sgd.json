@@ -1,11 +1,8 @@
 {
   "data_configs": {
     "sgd": {
-      "data_path": "/Users/chen/Study/CI/NMMR_q/data/SGD"
-    },
-    "rhc": {
-      "data_path": "/Users/chen/Study/CI/NMMR_q/data/right_heart_catheterization",
-      "use_all_X": false
+      "data_path": "/Users/chen/Study/CI/NMMR_q/data/SGD",
+      "n_samples": 2000
     }
   },
   "train_params": {

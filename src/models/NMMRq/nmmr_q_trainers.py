@@ -10,8 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler, autocast
 
-from src.data.ate.data_class import SGDDataset, RHCDataset
-# from torch.utils.data import DataLoader
+
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
 from src.models.NMMRq.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
@@ -25,7 +24,6 @@ def _resolve_dataset(dataset):
     if isinstance(dataset, Subset):
         return dataset.dataset, dataset.indices
     return dataset, None
-
 
 def _select_rows(tensor, indices):
     """
@@ -67,9 +65,14 @@ class NMMR_Q_Trainer_SGD:
         self.loss_name = train_params['loss_name']
         self.scaler = GradScaler() if self.gpu_flg else None
         self.kernel_gamma = train_params['kernel_gamma']
+        '''
+        记录设备信息并实例化 q-损失，确保与 kernel/loss 配置一致
+        '''
         self.device = torch.device('cuda' if self.gpu_flg else 'cpu')
         self.q_loss = NMMR_Q_Loss(
+            #kernel_gamma=self.train_params.get('kernel_gamma', 1.0),
             use_u_statistic=self.train_params.get('use_u_statistic', False),
+            #device=self.device.type,
         )
         
         self.writer = None
@@ -81,16 +84,11 @@ class NMMR_Q_Trainer_SGD:
             self.log_metrics = False
 
     def _compute_kernel_matrix(self, w, x):
-        """
-        辅助函数：计算全 Batch 的核矩阵
-        输入: w [N, w_dim], x [N, x_dim]
-        输出: K [N, N]
-        """
+        
         N = w.shape[0]
         wx_group = torch.cat([w, x], dim=1)  # [N, D]
         sigma_data = fit_sigma(wx_group)
         
-        # 使用 kernel_utils 中的函数计算全矩阵
         k_matrix = calculate_kernel_matrix_batched(
             dataset=wx_group,
             batch_indices=(0, N),
@@ -109,12 +107,9 @@ class NMMR_Q_Trainer_SGD:
         train_dataset, train_indices = _resolve_dataset(train_loader.dataset)
         val_dataset, val_indices = _resolve_dataset(val_loader.dataset)
 
-        # --- 自动计算输入维度 ---
-        # 模型的输入是 Z, X, A
         Z_dim = train_dataset.Z.shape[1]
         X_dim = train_dataset.X.shape[1]
         input_size = Z_dim + X_dim
-        # -----------------------------
 
         model0 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
         model1 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
@@ -193,7 +188,6 @@ class NMMR_Q_Trainer_SGD:
                 model1.eval()
                 with torch.no_grad():
                     # --- 在整个训练集上评估 ---
-
                     train_A = _select_rows(train_dataset.A, train_indices).to(self.device)
                     train_W = _select_rows(train_dataset.W, train_indices).to(self.device)
                     train_Z = _select_rows(train_dataset.Z, train_indices).to(self.device)
@@ -223,6 +217,7 @@ class NMMR_Q_Trainer_SGD:
                     self.writer.add_scalar(f'{self.loss_name}/train', total_train_loss, epoch)
                     self.causal_train_losses.append(total_train_loss.item()) # .item()
                     
+                    # --- 在整个验证集上评估 ---
 
                     val_A = _select_rows(val_dataset.A, val_indices).to(self.device)
                     val_W = _select_rows(val_dataset.W, val_indices).to(self.device)
@@ -256,10 +251,7 @@ class NMMR_Q_Trainer_SGD:
 
     @staticmethod
     def predict(model: NMMR_Q_DualModel, dataset_view):
-        """
-        按照 φ̂_U(V) = (1/n) ∑ (-1)^{1-a_i} q̂_U(V)(a_i, x_i, z_i) y_i 的形式
-        对给定数据集计算估计值。
-        """
+
         model.eval()
 
         model_device = next(model.parameters()).device
@@ -268,14 +260,16 @@ class NMMR_Q_Trainer_SGD:
         X_samples = dataset_view.X.to(model_device)
         Y_samples = dataset_view.Y.to(model_device)
 
+ 
         with torch.no_grad():
 
             q_hat = model(Z_samples, X_samples, A_samples)
 
-        # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
-
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()
         
+class NMMR_Q_Trainer_RHC(NMMR_Q_Trainer_SGD):
+
+    pass

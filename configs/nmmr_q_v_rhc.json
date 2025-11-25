@@ -1,8 +1,8 @@
 {
   "data_configs": {
-    "sgd": {
-      "data_path": "/Users/chen/Study/CI/NMMR_q/data/SGD",
-      "n_samples": 2000
+    "rhc": {
+      "data_path": "/home/chz/NMMR_q/data/right_heart_catheterization",
+      "use_all_X": true
     }
   },
   "train_params": {
@@ -15,7 +15,7 @@
     "network_depth": 4,
     "use_u_statistic": false,
     "kernel_gamma": 1.0,
-    "hpo_n_trials":50,
+    "hpo_n_trials":10,
 
     "learning_rate": {
         "type":"float",
@@ -25,12 +25,12 @@
     },
     "network_width": {
         "type":"categorical",
-        "choices":[40, 60, 80, 120]
+        "choices":[40, 50, 60]
     },
     "l2_penalty": {
         "type": "float",
         "low": 1e-8,
-        "high": 1e-4,
+        "high": 3e-8,
         "log": true
     }
   }

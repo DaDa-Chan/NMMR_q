@@ -7,9 +7,9 @@ from sklearn.model_selection import KFold
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
-from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer_SGD
+from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer_SGD, NMMR_Q_Trainer_RHC
 from src.data.ate.sgd_pv import generate_data
-from src.data.ate.data_class import SGDDataset, RHCDataset
+from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset
 
 
 def _locate_split_file(
@@ -32,17 +32,14 @@ def _locate_split_file(
 def _parse_optuna_space(
     train_params: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    将 train_params 拆分为 固定的 (base) 和 可变的 (search_space)。
-    """
+
     base_params = {}
     search_space = {}
     for key, value in train_params.items():
         if isinstance(value, dict) and "type" in value:
-            # 这是一个 Optuna 搜索参数
+
             search_space[key] = value
         else:
-            # 这是一个固定的基础参数
             base_params[key] = value
     return base_params, search_space
 
@@ -73,6 +70,7 @@ def _suggest_from_trial(
         raise ValueError(f"未知的 Optuna 参数类型: {param_type}")
 
 def _run_optuna_tuning(
+    data_name: str,
     dataset,
     n_splits: int,
     n_trials: int,
@@ -111,7 +109,7 @@ def _run_optuna_tuning(
         ):
             # 调优时不在 fold 级别保存日志 (dump_folder=None)
             trainer = _create_trainer(
-                data_configs, current_params, random_seed, dump_folder=None
+                data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
             )
 
             train_loader = DataLoader(
@@ -168,19 +166,15 @@ def _run_optuna_tuning(
     final_best_params = {**base_train_params, **study.best_params}
     return final_best_params
 
-def _run_cross_fitting(dataset,
+def _run_cross_fitting(data_name:str,
+                       dataset,
                        n_splits: int,
                        train_params: Dict[str, Any],
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        dump_folder: Optional[Path],
                        tag: str) -> Tuple[torch.Tensor, List[float]]:
-    """
-    对任意数据集执行 cross fitting:
-    - 将数据划分为 n_splits 折
-    - 在每折上训练模型（fold 内部再 8:2 划分 train/val）
-    - 在其余折上直接计算 ATE_i，最后求均值
-    """
+
     batch_size = train_params['batch_size']
     cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
 
@@ -197,7 +191,7 @@ def _run_cross_fitting(dataset,
             fold_folder = dump_folder / f"fold_{fold_idx}"
             fold_folder.mkdir(parents=True, exist_ok=True)
 
-        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder)
+        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder, data_name)
 
         train_loader, val_loader = _build_loaders_for_fold(
             dataset=dataset,
@@ -226,16 +220,22 @@ def _run_cross_fitting(dataset,
     print(f"[CF-{tag}] 平均 ATE: {ate_tensor.item():.6f}")
     return ate_tensor, ate_values
 
-def _create_trainer(data_configs, train_params, random_seed, dump_folder):
-    """
-    目前 SGD 与 RHC 共用同一 Trainer，若未来需要可在此扩展。
-    """
-    return NMMR_Q_Trainer_SGD(
-        data_configs=data_configs,
-        train_params=train_params,
-        random_seed=random_seed,
-        dump_folder=dump_folder,
-    )
+def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
+    
+    if data_name == 'sgd':      
+        return NMMR_Q_Trainer_SGD(
+            data_configs=data_configs,
+            train_params=train_params,
+            random_seed=random_seed,
+            dump_folder=dump_folder,
+        )
+    elif data_name == 'rhc' :
+        return NMMR_Q_Trainer_RHC(
+            data_configs=data_configs,
+            train_params=train_params,
+            random_seed=random_seed,
+            dump_folder=dump_folder,
+        )
 
 def _build_loaders_for_fold(dataset,
                             indices: List[int],
@@ -330,7 +330,6 @@ def _evaluate_q_loss(trainer,
 
     return float(loss_total.item())
 
-
 def NMMR_Q_experiment(dataset_name: str,
                       data_configs: Dict[str, Any],
                       train_params: Dict[str, Any],
@@ -338,8 +337,8 @@ def NMMR_Q_experiment(dataset_name: str,
                       random_seed: int):
     """
     运行 NMMR-Q 实验:
-      * SGD: 先在 train 集上做 K-fold CV，再在 cf 集上 cross fitting。
-      * RHC: 直接在指定 split 上执行 cross fitting（后续可扩展其它流程）。
+      * SGD: 生成数据 -> K-fold HPO -> Cross Fitting
+      * RHC: 加载数据 -> K-fold HPO -> Cross Fitting
     """
     print(f"--- 运行 NMMR-Q 实验 ---")
     print(f"数据集: {dataset_name}")
@@ -362,7 +361,7 @@ def NMMR_Q_experiment(dataset_name: str,
         
         data_base_path = Path(data_configs['data_path'])
         
-        n = 10000
+        n = data_configs['n_samples']
         train_df = generate_data(n_samples=n)
         cf_df = generate_data(n_samples=n)
 
@@ -398,6 +397,7 @@ def NMMR_Q_experiment(dataset_name: str,
         if search_space:
             print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
             final_train_params = _run_optuna_tuning(
+                data_name = dataset_key,
                 dataset=base_dataset,
                 n_splits=n_splits,
                 n_trials=hpo_n_trials,
@@ -412,6 +412,7 @@ def NMMR_Q_experiment(dataset_name: str,
 
         print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
         ate_estimate, ate_values = _run_cross_fitting(
+            data_name=dataset_key,
             dataset=cf_dataset,
             n_splits=n_splits,
             train_params=final_train_params,
@@ -422,27 +423,50 @@ def NMMR_Q_experiment(dataset_name: str,
         )
 
     elif dataset_key == 'rhc':
-        rhc_split = data_configs.get('cf_split', 'train')
-        use_all_x = data_configs.get('use_all_X', False)
         rhc_data_dir = data_configs.get('data_path')
-        cf_dataset = RHCDataset(
-            split=rhc_split,
-            use_all_x=use_all_x,
-            data_dir=rhc_data_dir,
-            device=device,
-        )
+        use_all_x = data_configs.get('use_all_X', False)
+        trainer_data_configs = {'rhc': data_configs}
+        
+        print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
+        
+        # 2. 加载数据
+        # HPO 使用 Train 集
+        train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+        if search_space:
+            print("\n===> [RHC] 开始训练集 K-fold HPO")
+            final_train_params = _run_optuna_tuning(
+                data_name=dataset_key,
+                dataset=train_dataset, 
+                n_splits=n_splits,
+                n_trials=hpo_n_trials,
+                base_train_params=base_params,
+                search_space=search_space,
+                data_configs=trainer_data_configs, 
+                random_seed=random_seed,
+            )
+        else:
+            print("\n===> [RHC] 跳过 HPO,使用默认参数")
+            final_train_params = base_params
 
-        print("\n===> 在 RHC 数据集上执行 cross fitting (无 CV)")
+        # 4. Cross Fitting (Full Dataset)
+        # 加载 Val 和 Test 集，并与 Train 集结合
+        print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
+        val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+        test_dataset = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+        full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
+        
+        print(f"     全量数据样本数: {len(full_dataset)}")
+
         ate_estimate, ate_values = _run_cross_fitting(
-            dataset=cf_dataset,
+            data_name=dataset_key,
+            dataset=full_dataset, # 在全量数据上进行 Cross Fitting
             n_splits=n_splits,
-            train_params=train_params,
-            data_configs=data_configs,
+            train_params=final_train_params,
+            data_configs=trainer_data_configs,
             random_seed=random_seed,
-            dump_folder=None,
-            tag="rhc_cf",
+            dump_folder=dump_folder,
+            tag="rhc_full_cf",
         )
-
     else:
         raise ValueError(f"未知的数据集: {dataset_name}")
 

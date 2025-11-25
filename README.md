@@ -15,7 +15,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> 依赖包含 PyTorch、scikit-learn、tensorboard、tqdm 等，确保使用 Python 3.10+。本项目使用Python 3.11.14
+> 依赖包含 PyTorch、scikit-learn、tensorboard、tqdm 等，确保使用 Python 3.10+。
 
 ### 2. 数据放置
 
@@ -35,6 +35,13 @@ python src/experiment.py \
   --model_name nmmr_q \
   --config_path configs/nmmr_q_u_sgd.json \
   --dump_folder results
+
+python src/experiment.py \
+  --dataset_name sgd \
+  --model_name nmmr_q \
+  --config_path configs/nmmr_q_v_sgd.json \
+  --dump_folder results
+
 
 # 在 RHC 数据上进行 cross fitting
 python src/experiment.py \
