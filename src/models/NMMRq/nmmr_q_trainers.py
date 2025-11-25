@@ -13,7 +13,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
-from src.models.NMMRq.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
+from src.models.NMMRq.kernel_q_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 
 
 def _resolve_dataset(dataset):
@@ -51,7 +51,7 @@ class NMMR_Q_DualModel(nn.Module):
             return pred0, pred1
 
 
-class NMMR_Q_Trainer_SGD:
+class NMMR_Q_Trainer:
     def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
                  dump_folder: Optional[Path] = None):
         self.data_config = data_configs
@@ -70,9 +70,7 @@ class NMMR_Q_Trainer_SGD:
         '''
         self.device = torch.device('cuda' if self.gpu_flg else 'cpu')
         self.q_loss = NMMR_Q_Loss(
-            #kernel_gamma=self.train_params.get('kernel_gamma', 1.0),
             use_u_statistic=self.train_params.get('use_u_statistic', False),
-            #device=self.device.type,
         )
         
         self.writer = None
@@ -84,11 +82,15 @@ class NMMR_Q_Trainer_SGD:
             self.log_metrics = False
 
     def _compute_kernel_matrix(self, w, x):
-        
+        """
+        辅助函数：计算全 Batch 的核矩阵
+        输入: w [N, w_dim], x [N, x_dim]
+        输出: K [N, N]
+        """
         N = w.shape[0]
         wx_group = torch.cat([w, x], dim=1)  # [N, D]
         sigma_data = fit_sigma(wx_group)
-        
+
         k_matrix = calculate_kernel_matrix_batched(
             dataset=wx_group,
             batch_indices=(0, N),
@@ -98,18 +100,19 @@ class NMMR_Q_Trainer_SGD:
         )
         return k_matrix
     
-    def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int = 0) -> NMMR_Q_common:
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int = 1) -> NMMR_Q_common:
         """
         训练NMMR_Q 模型。
         q0(Z, X) & q1(Z, X)
         """
-        
+
         train_dataset, train_indices = _resolve_dataset(train_loader.dataset)
         val_dataset, val_indices = _resolve_dataset(val_loader.dataset)
 
         Z_dim = train_dataset.Z.shape[1]
         X_dim = train_dataset.X.shape[1]
         input_size = Z_dim + X_dim
+        # -----------------------------
 
         model0 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
         model1 = NMMR_Q_common(input_dim=input_size, train_params=self.train_params)
@@ -118,21 +121,23 @@ class NMMR_Q_Trainer_SGD:
             model0.cuda()
             model1.cuda()
 
-        # weight_decay 实现 L2 惩罚
         optimizer0 = optim.Adam(list(model0.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
         optimizer1 = optim.Adam(list(model1.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
 
         print(f"开始训练 NMMR_Q (q0, q1)模型, 输入维度: {input_size}")
         
         # 训练模型
-        for epoch in tqdm(range(self.n_epochs), desc="Epochs"):
+        for epoch in tqdm(range(self.n_epochs), desc="Epochs", disable=not verbose):
             # 设置模型为训练模式
             model0.train() 
             model1.train()
             
             # DataLoader 循环
             for batch_data in train_loader:
-
+                
+                '''
+                批次迁移到目标设备，确保与模型一致
+                '''
                 batch_A = batch_data['A'].to(self.device)
                 batch_W = batch_data['W'].to(self.device)
                 batch_Z = batch_data['Z'].to(self.device)
@@ -188,6 +193,9 @@ class NMMR_Q_Trainer_SGD:
                 model1.eval()
                 with torch.no_grad():
                     # --- 在整个训练集上评估 ---
+                    '''
+                    全量训练集迁移到设备做度量
+                    '''
                     train_A = _select_rows(train_dataset.A, train_indices).to(self.device)
                     train_W = _select_rows(train_dataset.W, train_indices).to(self.device)
                     train_Z = _select_rows(train_dataset.Z, train_indices).to(self.device)
@@ -218,7 +226,9 @@ class NMMR_Q_Trainer_SGD:
                     self.causal_train_losses.append(total_train_loss.item()) # .item()
                     
                     # --- 在整个验证集上评估 ---
-
+                    '''
+                    全量验证集迁移到设备做度量
+                    '''
                     val_A = _select_rows(val_dataset.A, val_indices).to(self.device)
                     val_W = _select_rows(val_dataset.W, val_indices).to(self.device)
                     val_Z = _select_rows(val_dataset.Z, val_indices).to(self.device)
@@ -246,12 +256,13 @@ class NMMR_Q_Trainer_SGD:
                     self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val_full, epoch)
                     self.causal_val_losses.append(causal_loss_val_full.item()) # .item()
 
-        print("训练完成。")
         return NMMR_Q_DualModel(model0, model1)
 
     @staticmethod
     def predict(model: NMMR_Q_DualModel, dataset_view):
-
+        """
+        φ̂_U(V) = (1/n) ∑ (-1)^{1-a_i} q̂_U(V)(a_i, x_i, z_i) y_i 
+        """
         model.eval()
 
         model_device = next(model.parameters()).device
@@ -259,17 +270,20 @@ class NMMR_Q_Trainer_SGD:
         Z_samples = dataset_view.Z.to(model_device)
         X_samples = dataset_view.X.to(model_device)
         Y_samples = dataset_view.Y.to(model_device)
-
- 
+   
         with torch.no_grad():
 
             q_hat = model(Z_samples, X_samples, A_samples)
 
+        # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
+
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()
+    
+class NMMR_Q_Trainer_SGD(NMMR_Q_Trainer):
+    pass
         
-class NMMR_Q_Trainer_RHC(NMMR_Q_Trainer_SGD):
-
+class NMMR_Q_Trainer_RHC(NMMR_Q_Trainer):
     pass

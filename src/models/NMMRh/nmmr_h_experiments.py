@@ -9,7 +9,8 @@ from sklearn.model_selection import KFold
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
-from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer_SGD, NMMR_Q_Trainer_RHC
+
+from src.models.NMMRh.nmmr_h_trainers import NMMR_H_Trainer_SGD, NMMR_H_Trainer_RHC
 from src.data.ate.sgd_pv import generate_data
 from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset
 
@@ -41,10 +42,8 @@ def _parse_optuna_space(
     search_space = {}
     for key, value in train_params.items():
         if isinstance(value, dict) and "type" in value:
-            # 这是一个 Optuna 搜索参数
             search_space[key] = value
         else:
-            # 这是一个固定的基础参数
             base_params[key] = value
     return base_params, search_space
 
@@ -71,184 +70,26 @@ def _suggest_from_trial(
     else:
         raise ValueError(f"未知的 Optuna 参数类型: {param_type}")
 
-def _run_optuna_tuning(
-    data_name: str,
-    dataset,
-    n_splits: int,
-    n_trials: int,
-    base_train_params: Dict[str, Any],
-    search_space: Dict[str, Any],
-    data_configs: Dict[str, Any],
-    random_seed: int,
-) -> Dict[str, Any]:
+def _create_trainer(data_configs, train_params, random_seed, dump_folder):
     """
-    在给定数据集上执行 K-fold CV 以进行 Optuna 调参。
-    返回最优的超参数组合。
+    根据配置创建对应的 H Trainer
     """
-    if not search_space:
-        print("[Optuna] 未提供搜索空间，跳过调优。")
-        return base_train_params
-
-    # 减少 Optuna 日志
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    batch_size = base_train_params["batch_size"]
-    cv_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
-
-    def objective(trial: optuna.Trial) -> float:
-        # 为当前试验生成参数
-        current_params = copy.deepcopy(base_train_params)
-        for param_name, config in search_space.items():
-            current_params[param_name] = _suggest_from_trial(
-                trial, param_name, config
-            )
-
-        fold_val_losses: List[float] = []
-
-        # 运行 K-fold CV 来评估这组参数
-        for fold_idx, (train_idx, val_idx) in enumerate(
-            cv_kfold.split(np.arange(len(dataset))), start=1
-        ):
-            trainer = _create_trainer(
-                data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
-            )
-
-            train_loader = DataLoader(
-                dataset=Subset(dataset, train_idx.tolist()),
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=0,
-            )
-            val_loader = DataLoader(
-                dataset=Subset(dataset, val_idx.tolist()),
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=0,
-            )
-
-            try:
-                model = trainer.train(train_loader, val_loader)
-                val_loss = _evaluate_q_loss(
-                    trainer, model, dataset, val_idx.tolist()
-                )
-                fold_val_losses.append(val_loss)
-            
-            except Exception as e:
-                print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
-                return float("inf")
-            
-            finally:
-                if 'model' in locals():
-                    del model
-                if 'trainer' in locals():
-                    del trainer
-                del train_loader, val_loader
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-
-        # 返回 K-fold 的平均验证损失
-        avg_val_loss = np.mean(fold_val_losses)
-        return avg_val_loss
-
-    # 运行 Optuna Study
-    print(
-        f"[Optuna] 开始 {n_trials} 次试验的 K-fold (k={n_splits}) 调优..."
-    )
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials)
-
-    print(f"\n[Optuna] 调优完成。")
-    print(f"  最佳 Trial: {study.best_trial.number}")
-    print(f"  最佳 q-loss: {study.best_value:.6f}")
-    print(f"  最佳参数: {study.best_params}")
-
-    # 合并并返回最终的最优参数
-    final_best_params = {**base_train_params, **study.best_params}
-    return final_best_params
-
-def _run_cross_fitting(data_name:str,
-                       dataset,
-                       n_splits: int,
-                       train_params: Dict[str, Any],
-                       data_configs: Dict[str, Any],
-                       random_seed: int,
-                       log_folder: Optional[Path],
-                       tag: str) -> Tuple[torch.Tensor, List[float]]:
-    """
-    对任意数据集执行 cross fitting:
-    - 将数据划分为 n_splits 折
-    - 在每折上训练模型（fold 内部再 8:2 划分 train/val）
-    - 在其余折上直接计算 ATE_i，最后求均值
-    """
-    batch_size = train_params['batch_size']
-    cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
-
-    fold_predictions: List[torch.Tensor] = []
-    ate_values: List[float] = []
-
-    for fold_idx, (eval_idx, train_idx) in enumerate(cf_kfold.split(np.arange(len(dataset))), start=1):
-        print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
-        train_fold_indices = eval_idx.tolist()   
-        eval_fold_indices = train_idx.tolist()   
-
-        fold_folder = None
-        if log_folder is not None:
-            fold_folder = log_folder / f"fold_{fold_idx}"
-            fold_folder.mkdir(parents=True, exist_ok=True)
-
-        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder, data_name)
-
-        train_loader, val_loader = _build_loaders_for_fold(
-            dataset=dataset,
-            indices=train_fold_indices,
-            batch_size=batch_size,
-            seed=random_seed + fold_idx,
-        )
-        model = trainer.train(train_loader, val_loader)
-
-        eval_view = _build_dataset_view(dataset, eval_fold_indices)
-        
-        fold_ate = trainer.predict(model, eval_view)
-        fold_predictions.append(fold_ate)
-        ate_values.append(fold_ate.item())
-        print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
-
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    if not fold_predictions:
-        raise RuntimeError("Cross-fitting 阶段未生成任何预测结果。")
-
-    ate_tensor = torch.stack(fold_predictions).mean()
-    print(f"[CF-{tag}] 平均 ATE(PIPW): {ate_tensor.item():.6f}")
-    return ate_tensor, ate_values
-
-def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
-    
-    if data_name == 'sgd':      
-        return NMMR_Q_Trainer_SGD(
+    if 'rhc' in data_configs:
+        return NMMR_H_Trainer_RHC(
             data_configs=data_configs,
             train_params=train_params,
             random_seed=random_seed,
             dump_folder=dump_folder,
         )
-    elif data_name == 'rhc' :
-        return NMMR_Q_Trainer_RHC(
+    else:
+        return NMMR_H_Trainer_SGD(
             data_configs=data_configs,
             train_params=train_params,
             random_seed=random_seed,
             dump_folder=dump_folder,
         )
 
-def _build_loaders_for_fold(dataset,
-                            indices: List[int],
-                            batch_size: int,
-                            seed: int):
-    """
-    将 fold 内部再划分为 train/val，以便 cross-fitting 阶段训练。
-    """
+def _build_loaders_for_fold(dataset, indices: List[int], batch_size: int, seed: int):
     if len(indices) == 0:
         raise ValueError("fold 中没有样本。")
 
@@ -275,75 +116,183 @@ def _build_loaders_for_fold(dataset,
 
 def _build_dataset_view(dataset, indices: List[int]):
     """
-    创建仅包含所选索引的“视图”，以便 trainer.predict 可以像操作完整数据集一样使用。
+    构建数据视图，用于评估和预测
     """
     if len(indices) == 0:
         raise ValueError("评估折没有样本。")
+    
     reference_tensor = getattr(dataset, 'X', getattr(dataset, 'A', None))
     base_device = reference_tensor.device if isinstance(reference_tensor, torch.Tensor) else torch.device('cpu')
     default_dtype = reference_tensor.dtype if isinstance(reference_tensor, torch.Tensor) else torch.float32
+    
     index_tensor = torch.as_tensor(indices, device=base_device, dtype=torch.long)
     view = type('DatasetView', (), {})()
     dataset_len = len(dataset)
 
     for attr in ['X', 'A', 'Z', 'W', 'U', 'Y']:
         tensor = getattr(dataset, attr, None)
-        if tensor is None or tensor.shape[0] != dataset_len:
-            # 若属性不存在或长度不匹配（例如 RHC 没有 U），则用 0 填充
-            tensor = torch.zeros(
-                (dataset_len, 1),
-                device=base_device,
-                dtype=default_dtype,
-            )
+        if tensor is None:
+            tensor = torch.zeros((dataset_len, 1), device=base_device, dtype=default_dtype)
         setattr(view, attr, tensor.index_select(0, index_tensor))
     return view
 
-def _evaluate_q_loss(trainer,
-                     model: torch.nn.Module,
-                     dataset,
-                     indices: List[int]) -> float:
+def _evaluate_h_loss(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> float:
     """
-    计算指定子集上的 q-loss 用于交叉验证评分。
+    计算验证集上的 H-Loss (用于 HPO)
     """
     view = _build_dataset_view(dataset, indices)
     with torch.no_grad():
         A = view.A.to(trainer.device)
         W = view.W.to(trainer.device)
-        X = view.X.to(trainer.device)
         Z = view.Z.to(trainer.device)
+        X = view.X.to(trainer.device)
+        Y = view.Y.to(trainer.device)
         
-        k_matrix = trainer._compute_kernel_matrix(W, X)
-        loss_total = 0.0
+        # 1. 计算 Kernel (定义在 A, Z, X 上)
+        k_matrix = trainer._compute_kernel_matrix(A, Z, X)
         
-        # Loss 0
-        mask0 = (A < 0.5).squeeze()
-        if mask0.sum() > 0:
-            # 从 DualModel 中提取 net0
-            # 注意：model 是 NMMR_Q_DualModel
-            inputs0 = torch.cat((Z[mask0], X[mask0]), dim=1)
-            pred0 = model.net0(inputs0)
-            loss0 = trainer.q_loss(pred0, mask0, k_matrix)
-            loss_total += loss0
+        # 2. 前向传播 h(A, W, X)
+        # 输入拼接顺序需与 Trainer 保持一致: cat(A, W, X)
+        model_input = torch.cat((A, W, X), dim=1)
+        pred = model(model_input)
+        
+        # 3. 计算 Loss
+        loss = trainer.h_loss(pred, Y, k_matrix)
             
-        # Loss 1
-        mask1 = (A > 0.5).squeeze()
-        if mask1.sum() > 0:
-            inputs1 = torch.cat((Z[mask1], X[mask1]), dim=1)
-            pred1 = model.net1(inputs1)
-            loss1 = trainer.q_loss(pred1, mask1, k_matrix)
-            loss_total += loss1
+    return float(loss.item())
 
-    return float(loss_total.item())
+def _run_optuna_tuning(
+    dataset,
+    n_splits: int,
+    n_trials: int,
+    base_train_params: Dict[str, Any],
+    search_space: Dict[str, Any],
+    data_configs: Dict[str, Any],
+    random_seed: int,
+) -> Dict[str, Any]:
+    
+    if not search_space:
+        print("[Optuna] 未提供搜索空间，跳过调优。")
+        return base_train_params
 
-def NMMR_Q_experiment(dataset_name: str,
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    
+    batch_size = base_train_params["batch_size"]
+    cv_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+
+    def objective(trial: optuna.Trial) -> float:
+        current_params = copy.deepcopy(base_train_params)
+        for param_name, config in search_space.items():
+            current_params[param_name] = _suggest_from_trial(
+                trial, param_name, config
+            )
+
+        fold_val_losses: List[float] = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(
+            cv_kfold.split(np.arange(len(dataset))), start=1
+        ):
+            trainer = _create_trainer(
+                data_configs, current_params, random_seed, dump_folder=None
+            )
+            
+            # 这里复用 _build_loaders_for_fold 也可以，或者直接构造
+            t_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, num_workers=0)
+            v_loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, num_workers=0)
+
+            try:
+                model = trainer.train(t_loader, v_loader)
+                val_loss = _evaluate_h_loss(trainer, model, dataset, val_idx.tolist())
+                fold_val_losses.append(val_loss)
+            except Exception as e:
+                print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
+                return float("inf")
+            finally:
+                if 'model' in locals(): del model
+                if 'trainer' in locals(): del trainer
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        return np.mean(fold_val_losses)
+
+    print(f"[Optuna] 开始 {n_trials} 次试验的 K-fold (k={n_splits}) 调优...")
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+
+    print(f"\n[Optuna] 调优完成。")
+    print(f"  最佳 Trial: {study.best_trial.number}")
+    print(f"  最佳 q-loss: {study.best_value:.6f}")
+    print(f"  最佳参数: {study.best_params}")
+    
+    final_best_params = {**base_train_params, **study.best_params}
+    return final_best_params
+
+def _run_cross_fitting(dataset,
+                       n_splits: int,
+                       train_params: Dict[str, Any],
+                       data_configs: Dict[str, Any],
+                       random_seed: int,
+                       log_folder: Optional[Path],
+                       tag: str) -> Tuple[torch.Tensor, List[float]]:
+    
+    batch_size = train_params['batch_size']
+    cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+    
+    fold_predictions: List[torch.Tensor] = []
+    ate_values: List[float] = []
+    
+    indices = np.arange(len(dataset))
+
+    for fold_idx, (train_idx_np, eval_idx_np) in enumerate(cf_kfold.split(indices), start=1):
+        print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
+        train_fold_indices = train_idx_np.tolist()
+        eval_fold_indices = eval_idx_np.tolist()
+
+        fold_folder = log_folder / f"fold_{fold_idx}" if log_folder else None
+        if fold_folder: fold_folder.mkdir(parents=True, exist_ok=True)
+
+        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder)
+        
+        train_loader, val_loader = _build_loaders_for_fold(
+            dataset=dataset,
+            indices=train_fold_indices,
+            batch_size=batch_size,
+            seed=random_seed + fold_idx,
+        )
+        
+        # 训练
+        model = trainer.train(train_loader, val_loader)
+
+        # 预测 ATE
+        eval_view = _build_dataset_view(dataset, eval_fold_indices)
+        fold_ate = trainer.predict(model, eval_view)
+        
+        fold_predictions.append(fold_ate)
+        ate_values.append(fold_ate.item())
+        print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
+
+        del model
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+    if not fold_predictions:
+        raise RuntimeError("Cross-fitting 阶段未生成任何预测结果。")
+
+    ate_tensor = torch.stack(fold_predictions).mean()
+    print(f"[CF-{tag}] 平均 ATE(POR): {ate_tensor.item():.6f}")
+    return ate_tensor, ate_values
+
+# -------------------------------------------------------
+# 主入口函数: NMMR_H_experiment
+# -------------------------------------------------------
+
+def NMMR_H_experiment(dataset_name: str,
                       data_configs: Dict[str, Any],
                       train_params: Dict[str, Any],
                       log_folder: Path,
                       random_seed: int):
     """
-    运行 NMMR-Q 实验 (求解 q 函数并计算 ATE)
+    运行 NMMR-H 实验 (求解 h 函数并计算 ATE)
     """
-    print(f"--- 运行 NMMR-Q 实验 ---")
+    print(f"--- 运行 NMMR-H 实验 ---")
     print(f"数据集: {dataset_name}")
     print(f"随机种子: {random_seed}")
 
@@ -359,16 +308,16 @@ def NMMR_Q_experiment(dataset_name: str,
     
     final_train_params: Dict[str, Any] = {}
 
-
     if dataset_key == 'sgd':
+        data_base_path = Path(data_configs['data_path'])
         
         data_base_path = Path(data_configs['data_path'])
         n_trials = data_configs.get('n_trials',-1)
         n_samples = data_configs.get('n_samples',2000)
-        
+
         # 重复实验的时候不写入数据
         if n_trials > 0:
-            POR = []
+            PIPW = []
             for _ in range(1, n_trials + 1):
                 df = generate_data(n_samples=n_samples)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
@@ -382,12 +331,12 @@ def NMMR_Q_experiment(dataset_name: str,
                     log_folder=log_folder,
                     tag="sgd_cf",
                 )
-                POR.append(ate_estimate.item())
+                PIPW.append(ate_estimate.item())
             results = pd.DataFrame({
-                "POR": POR
+                "PIPW": PIPW
             })
             print(f"\n--- SGD ATE 估计结果 (平均 over {n_trials} 次试验):")
-            print(f"POR = {results['POR'].mean():.4f}")
+            print(f"PIPW = {results['PIPW'].mean():.4f}")
             print("----------------------------------")
             
             output_path = data_configs.get('output_path', 'predicts/sgd/nmmr_q')
@@ -396,9 +345,8 @@ def NMMR_Q_experiment(dataset_name: str,
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             out_file = output_path / f"nmmr_q_{timestamp}.csv"
             results.to_csv(out_file, index=False)
-
             
-        # 调参阶段写入数据
+            
         else:
             train_df = generate_data(n_samples=n_samples)
             cf_df = generate_data(n_samples=n_samples)
@@ -429,82 +377,83 @@ def NMMR_Q_experiment(dataset_name: str,
 
             base_dataset = SGDDataset(train_path, device=device)
             cf_dataset = SGDDataset(cf_path, device=device)
-
-            # 在 SGD 训练集 (base_dataset) 上执行 HPO 调参
-        
-            if search_space:
-                print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
-                final_train_params = _run_optuna_tuning(
-                    data_name = dataset_key,
-                    dataset=base_dataset,
-                    n_splits=n_splits,
-                    n_trials=hpo_n_trials,
-                    base_train_params=base_params,
-                    search_space=search_space,
-                    data_configs=data_configs,
-                    random_seed=random_seed,
-                )
-            else:
-                print("\n===> 使用 config 中的固定参数")
-                final_train_params = base_params
-
-            print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
-            ate_estimate, ate_values = _run_cross_fitting(
-                data_name=dataset_key,
-                dataset=cf_dataset,
+        if search_space:
+            print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
+            final_train_params = _run_optuna_tuning(
+                data_name = dataset_key,
+                dataset=base_dataset,
                 n_splits=n_splits,
-                train_params=final_train_params,
+                n_trials=hpo_n_trials,
+                base_train_params=base_params,
+                search_space=search_space,
                 data_configs=data_configs,
                 random_seed=random_seed,
-                log_folder=log_folder,
-                tag="sgd_cf",
             )
+        else:
+            print("\n===> 使用固定默认参数")
+            final_train_params = base_params
+
+
+        print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
+        ate_estimate, ate_values = _run_cross_fitting(
+            dataset=cf_dataset,
+            n_splits=n_splits,
+            train_params=final_train_params,
+            data_configs=data_configs,
+            random_seed=random_seed,
+            log_folder=log_folder,
+            tag="sgd_test",
+        )
 
     elif dataset_key == 'rhc':
         rhc_data_dir = data_configs.get('data_path')
         use_all_x = data_configs.get('use_all_X', False)
         trainer_data_configs = {'rhc': data_configs}
-        
+
         print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
         
-
+        # 1. 加载数据
+        # HPO 使用 Train
         train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+        
+        # 2. HPO (Train Split)
         if search_space:
             print("\n===> [RHC] 开始训练集 K-fold HPO")
             final_train_params = _run_optuna_tuning(
-                data_name=dataset_key,
-                dataset=train_dataset, 
+                dataset=train_dataset,
                 n_splits=n_splits,
                 n_trials=hpo_n_trials,
                 base_train_params=base_params,
                 search_space=search_space,
-                data_configs=trainer_data_configs, 
+                data_configs=trainer_data_configs,
                 random_seed=random_seed,
             )
         else:
-            print("\n===> [RHC] 跳过 HPO,使用默认参数")
+            print("\n===> [RHC] 跳过 HPO，使用默认参数")
             final_train_params = base_params
 
+        # 3. Cross Fitting (Full Dataset)
         print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
         val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
         test_dataset = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
         
+        # 使用 MergedDataset
+        full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
         print(f"     全量数据样本数: {len(full_dataset)}")
 
         ate_estimate, ate_values = _run_cross_fitting(
-            data_name=dataset_key,
-            dataset=full_dataset, # 在全量数据上进行 Cross Fitting
+            dataset=full_dataset,
             n_splits=n_splits,
             train_params=final_train_params,
             data_configs=trainer_data_configs,
             random_seed=random_seed,
             log_folder=log_folder,
-            tag="rhc_full_cf",
+            tag="rhc_full",
         )
+
     else:
         raise ValueError(f"未知的数据集: {dataset_name}")
 
-    print(f"\n--- 最终 ATE(PIPW) (Seed {random_seed}) ---")
-    print(f"ATE(PIPW) = {ate_estimate.item():.4f}")
+    print(f"\n--- 最终 ATE(POR) (Seed {random_seed}) ---")
+    print(f"ATE(POR) = {ate_estimate.item():.4f}")
     print("----------------------------------")
