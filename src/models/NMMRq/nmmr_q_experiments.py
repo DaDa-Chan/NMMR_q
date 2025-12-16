@@ -109,6 +109,7 @@ def _run_optuna_tuning(
         for fold_idx, (train_idx, val_idx) in enumerate(
             cv_kfold.split(np.arange(len(dataset))), start=1
         ):
+            # 调优时不在 fold 级别保存日志 (dump_folder=None)
             trainer = _create_trainer(
                 data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
             )
@@ -151,7 +152,6 @@ def _run_optuna_tuning(
         avg_val_loss = np.mean(fold_val_losses)
         return avg_val_loss
 
-    # 运行 Optuna Study
     print(
         f"[Optuna] 开始 {n_trials} 次试验的 K-fold (k={n_splits}) 调优..."
     )
@@ -174,7 +174,7 @@ def _run_cross_fitting(data_name:str,
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        log_folder: Optional[Path],
-                       tag: str) -> Tuple[torch.Tensor, List[float]]:
+                       tag: str) -> Tuple[torch.Tensor, List[float], np.ndarray]:
     """
     对任意数据集执行 cross fitting:
     - 将数据划分为 n_splits 折
@@ -184,13 +184,17 @@ def _run_cross_fitting(data_name:str,
     batch_size = train_params['batch_size']
     cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
 
+    # 存储全量预测结果 (N, 1)
+    dataset_len = len(dataset)
+    q_preds_full = np.zeros((dataset_len, 1), dtype=np.float32)
+    
     fold_predictions: List[torch.Tensor] = []
     ate_values: List[float] = []
 
-    for fold_idx, (eval_idx, train_idx) in enumerate(cf_kfold.split(np.arange(len(dataset))), start=1):
+    for fold_idx, (train_idx, eval_idx) in enumerate(cf_kfold.split(np.arange(len(dataset))), start=1):
         print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
-        train_fold_indices = eval_idx.tolist()   
-        eval_fold_indices = train_idx.tolist()   
+        train_fold_indices = train_idx.tolist()   # 当前折用于训练
+        eval_fold_indices = eval_idx.tolist()   # 剩余样本用于计算 ATE
 
         fold_folder = None
         if log_folder is not None:
@@ -207,12 +211,25 @@ def _run_cross_fitting(data_name:str,
         )
         model = trainer.train(train_loader, val_loader)
 
-        eval_view = _build_dataset_view(dataset, eval_fold_indices)
-        
+        eval_view = _build_dataset_view(dataset, eval_fold_indices) 
         fold_ate = trainer.predict(model, eval_view)
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
         print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
+        
+        with torch.no_grad():
+            Z = eval_view.Z.to(trainer.device)
+            X = eval_view.X.to(trainer.device)
+            A = eval_view.A.to(trainer.device)
+            inputs = torch.cat((Z, X), dim=1)
+            
+            q0 = model.net0(inputs)
+            q1 = model.net1(inputs)
+
+            q_pred = torch.where(A > 0.5, q1, q0)
+
+            q_preds_full[eval_fold_indices] = q_pred.cpu().numpy()
+
 
         del model
         if torch.cuda.is_available():
@@ -223,7 +240,7 @@ def _run_cross_fitting(data_name:str,
 
     ate_tensor = torch.stack(fold_predictions).mean()
     print(f"[CF-{tag}] 平均 ATE(PIPW): {ate_tensor.item():.6f}")
-    return ate_tensor, ate_values
+    return ate_tensor, ate_values, q_preds_full
 
 def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
     
@@ -284,6 +301,7 @@ def _build_dataset_view(dataset, indices: List[int]):
     default_dtype = reference_tensor.dtype if isinstance(reference_tensor, torch.Tensor) else torch.float32
     index_tensor = torch.as_tensor(indices, device=base_device, dtype=torch.long)
     view = type('DatasetView', (), {})()
+    
     dataset_len = len(dataset)
 
     for attr in ['X', 'A', 'Z', 'W', 'U', 'Y']:
@@ -339,7 +357,8 @@ def NMMR_Q_experiment(dataset_name: str,
                       data_configs: Dict[str, Any],
                       train_params: Dict[str, Any],
                       log_folder: Path,
-                      random_seed: int):
+                      random_seed: int,
+                      dataset=None):
     """
     运行 NMMR-Q 实验 (求解 q 函数并计算 ATE)
     """
@@ -355,8 +374,25 @@ def NMMR_Q_experiment(dataset_name: str,
     base_params, search_space = _parse_optuna_space(train_params_copy)
     
     n_splits = int(base_params.get('n_splits', 5))
-    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))
     
+    if dataset is not None:
+        ate_estimate, ate_values, q_preds = _run_cross_fitting(
+            data_name=dataset_key,
+            dataset=dataset,
+            n_splits=n_splits,
+            train_params=base_params, # 假设调参已完成或使用固定参数
+            data_configs=data_configs,
+            random_seed=random_seed,
+            log_folder=log_folder,
+            tag="external_cf",
+        )
+        # 返回结果供 double_rob.py 使用
+        return {
+            "PIPW": ate_estimate.item(),
+            "q_preds": q_preds
+        }
+    
+    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))  
     final_train_params: Dict[str, Any] = {}
 
 
@@ -365,14 +401,16 @@ def NMMR_Q_experiment(dataset_name: str,
         data_base_path = Path(data_configs['data_path'])
         n_trials = data_configs.get('n_trials',-1)
         n_samples = data_configs.get('n_samples',2000)
-        
+        scenario = data_configs.get('scenario', 1)
         # 重复实验的时候不写入数据
         if n_trials > 0:
-            POR = []
+            PIPW = []
+            use_u = base_params['use_u_statistic']
+            loss_name = "u" if use_u == "true" else "v"
             for _ in range(1, n_trials + 1):
-                df = generate_data(n_samples=n_samples)
+                df = generate_data(n_samples=n_samples, scenario= scenario)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
-                ate_estimate, ate_values = _run_cross_fitting(
+                ate_estimate, ate_values,_ = _run_cross_fitting(
                     data_name=dataset_key,
                     dataset=dataset_trial,
                     n_splits=n_splits,
@@ -382,26 +420,25 @@ def NMMR_Q_experiment(dataset_name: str,
                     log_folder=log_folder,
                     tag="sgd_cf",
                 )
-                POR.append(ate_estimate.item())
+                PIPW.append(ate_estimate.item())
             results = pd.DataFrame({
-                "POR": POR
+                "PIPW": PIPW
             })
             print(f"\n--- SGD ATE 估计结果 (平均 over {n_trials} 次试验):")
-            print(f"POR = {results['POR'].mean():.4f}")
+            print(f"PIPW = {results['POR'].mean():.4f}")
             print("----------------------------------")
             
-            output_path = data_configs.get('output_path', 'predicts/sgd/nmmr_q')
+            output_path = data_configs.get('output_path', 'predicts/sgd/nmmr')
             output_path = Path(output_path)
             output_path.mkdir(parents=True, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            out_file = output_path / f"nmmr_q_{timestamp}.csv"
+            out_file = output_path / f"pipw_{loss_name}_s{scenario}.csv"
             results.to_csv(out_file, index=False)
 
             
         # 调参阶段写入数据
         else:
-            train_df = generate_data(n_samples=n_samples)
-            cf_df = generate_data(n_samples=n_samples)
+            train_df = generate_data(n_samples=n_samples, scenario= scenario)
+            cf_df = generate_data(n_samples=n_samples, scenario= scenario)
 
             output_dir = data_base_path
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -449,7 +486,7 @@ def NMMR_Q_experiment(dataset_name: str,
                 final_train_params = base_params
 
             print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
-            ate_estimate, ate_values = _run_cross_fitting(
+            ate_estimate, ate_values, _ = _run_cross_fitting(
                 data_name=dataset_key,
                 dataset=cf_dataset,
                 n_splits=n_splits,
@@ -467,7 +504,8 @@ def NMMR_Q_experiment(dataset_name: str,
         
         print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
         
-
+        # 2. 加载数据
+        # HPO 使用 Train 集
         train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
         if search_space:
             print("\n===> [RHC] 开始训练集 K-fold HPO")
@@ -485,6 +523,8 @@ def NMMR_Q_experiment(dataset_name: str,
             print("\n===> [RHC] 跳过 HPO,使用默认参数")
             final_train_params = base_params
 
+        # 4. Cross Fitting (Full Dataset)
+        # 加载 Val 和 Test 集，并与 Train 集结合
         print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
         val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
         test_dataset = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
@@ -492,7 +532,7 @@ def NMMR_Q_experiment(dataset_name: str,
         
         print(f"     全量数据样本数: {len(full_dataset)}")
 
-        ate_estimate, ate_values = _run_cross_fitting(
+        ate_estimate, ate_values, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=full_dataset, # 在全量数据上进行 Cross Fitting
             n_splits=n_splits,
@@ -508,3 +548,8 @@ def NMMR_Q_experiment(dataset_name: str,
     print(f"\n--- 最终 ATE(PIPW) (Seed {random_seed}) ---")
     print(f"ATE(PIPW) = {ate_estimate.item():.4f}")
     print("----------------------------------")
+
+
+
+
+

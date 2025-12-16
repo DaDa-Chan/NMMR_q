@@ -70,19 +70,19 @@ def _suggest_from_trial(
     else:
         raise ValueError(f"未知的 Optuna 参数类型: {param_type}")
 
-def _create_trainer(data_configs, train_params, random_seed, dump_folder):
+def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
     """
     根据配置创建对应的 H Trainer
     """
-    if 'rhc' in data_configs:
-        return NMMR_H_Trainer_RHC(
+    if data_name == 'sgd':
+        return NMMR_H_Trainer_SGD(
             data_configs=data_configs,
             train_params=train_params,
             random_seed=random_seed,
             dump_folder=dump_folder,
         )
-    else:
-        return NMMR_H_Trainer_SGD(
+    elif data_name == 'rhc' :
+        return NMMR_H_Trainer_RHC(
             data_configs=data_configs,
             train_params=train_params,
             random_seed=random_seed,
@@ -115,31 +115,35 @@ def _build_loaders_for_fold(dataset, indices: List[int], batch_size: int, seed: 
     return train_loader, val_loader
 
 def _build_dataset_view(dataset, indices: List[int]):
-    """
-    构建数据视图，用于评估和预测
-    """
+
     if len(indices) == 0:
         raise ValueError("评估折没有样本。")
     
+    # 获取参考 tensor 以确定 device 和 dtype
     reference_tensor = getattr(dataset, 'X', getattr(dataset, 'A', None))
     base_device = reference_tensor.device if isinstance(reference_tensor, torch.Tensor) else torch.device('cpu')
     default_dtype = reference_tensor.dtype if isinstance(reference_tensor, torch.Tensor) else torch.float32
-    
     index_tensor = torch.as_tensor(indices, device=base_device, dtype=torch.long)
     view = type('DatasetView', (), {})()
-    dataset_len = len(dataset)
+
+    target_len = len(indices)
 
     for attr in ['X', 'A', 'Z', 'W', 'U', 'Y']:
         tensor = getattr(dataset, attr, None)
-        if tensor is None:
-            tensor = torch.zeros((dataset_len, 1), device=base_device, dtype=default_dtype)
-        setattr(view, attr, tensor.index_select(0, index_tensor))
+        
+        if tensor is not None:
+            try:
+                setattr(view, attr, tensor.index_select(0, index_tensor))
+            except RuntimeError:
+
+                setattr(view, attr, torch.zeros((target_len, 1), device=base_device, dtype=default_dtype))
+        else:
+
+            setattr(view, attr, torch.zeros((target_len, 1), device=base_device, dtype=default_dtype))
+            
     return view
 
 def _evaluate_h_loss(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> float:
-    """
-    计算验证集上的 H-Loss (用于 HPO)
-    """
     view = _build_dataset_view(dataset, indices)
     with torch.no_grad():
         A = view.A.to(trainer.device)
@@ -162,6 +166,7 @@ def _evaluate_h_loss(trainer, model: torch.nn.Module, dataset, indices: List[int
     return float(loss.item())
 
 def _run_optuna_tuning(
+    data_name:str,
     dataset,
     n_splits: int,
     n_trials: int,
@@ -193,7 +198,7 @@ def _run_optuna_tuning(
             cv_kfold.split(np.arange(len(dataset))), start=1
         ):
             trainer = _create_trainer(
-                data_configs, current_params, random_seed, dump_folder=None
+                data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
             )
             
             # 这里复用 _build_loaders_for_fold 也可以，或者直接构造
@@ -220,19 +225,20 @@ def _run_optuna_tuning(
 
     print(f"\n[Optuna] 调优完成。")
     print(f"  最佳 Trial: {study.best_trial.number}")
-    print(f"  最佳 q-loss: {study.best_value:.6f}")
+    print(f"  最佳 h-loss: {study.best_value:.6f}")
     print(f"  最佳参数: {study.best_params}")
     
     final_best_params = {**base_train_params, **study.best_params}
     return final_best_params
 
-def _run_cross_fitting(dataset,
+def _run_cross_fitting(data_name:str,
+                       dataset,
                        n_splits: int,
                        train_params: Dict[str, Any],
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        log_folder: Optional[Path],
-                       tag: str) -> Tuple[torch.Tensor, List[float]]:
+                       tag: str)  -> Tuple[torch.Tensor, List[float], Dict]:
     
     batch_size = train_params['batch_size']
     cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
@@ -241,16 +247,24 @@ def _run_cross_fitting(dataset,
     ate_values: List[float] = []
     
     indices = np.arange(len(dataset))
-
+    dataset_len = len(dataset)
+    
+    # 存储预测结果
+    h_fact_full = np.zeros((dataset_len, 1), dtype=np.float32)
+    h_1_full = np.zeros((dataset_len, 1), dtype=np.float32)
+    h_0_full = np.zeros((dataset_len, 1), dtype=np.float32)
+    
     for fold_idx, (train_idx_np, eval_idx_np) in enumerate(cf_kfold.split(indices), start=1):
         print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
         train_fold_indices = train_idx_np.tolist()
         eval_fold_indices = eval_idx_np.tolist()
 
-        fold_folder = log_folder / f"fold_{fold_idx}" if log_folder else None
-        if fold_folder: fold_folder.mkdir(parents=True, exist_ok=True)
+        fold_folder = None
+        if log_folder is not None:
+            fold_folder = log_folder / f"fold_{fold_idx}"
+            fold_folder.mkdir(parents=True, exist_ok=True)
 
-        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder)
+        trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder, data_name)
         
         train_loader, val_loader = _build_loaders_for_fold(
             dataset=dataset,
@@ -265,10 +279,30 @@ def _run_cross_fitting(dataset,
         # 预测 ATE
         eval_view = _build_dataset_view(dataset, eval_fold_indices)
         fold_ate = trainer.predict(model, eval_view)
-        
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
         print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
+        
+        with torch.no_grad():
+            W = eval_view.W.to(trainer.device)
+            X = eval_view.X.to(trainer.device)
+            A = eval_view.A.to(trainer.device)
+            
+            # Factual h(A, W, X)
+            inputs_fact = torch.cat((A, W, X), dim=1)
+            h_fact = model(inputs_fact)
+            
+            # Counterfactual h(1, W, X)
+            inputs_1 = torch.cat((torch.ones_like(A), W, X), dim=1)
+            h_1 = model(inputs_1)
+            
+            # Counterfactual h(0, W, X)
+            inputs_0 = torch.cat((torch.zeros_like(A), W, X), dim=1)
+            h_0 = model(inputs_0)
+            
+            h_fact_full[eval_fold_indices] = h_fact.cpu().numpy()
+            h_1_full[eval_fold_indices] = h_1.cpu().numpy()
+            h_0_full[eval_fold_indices] = h_0.cpu().numpy()
 
         del model
         if torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -278,7 +312,11 @@ def _run_cross_fitting(dataset,
 
     ate_tensor = torch.stack(fold_predictions).mean()
     print(f"[CF-{tag}] 平均 ATE(POR): {ate_tensor.item():.6f}")
-    return ate_tensor, ate_values
+    return ate_tensor, ate_values, {
+        "h_fact": h_fact_full,
+        "h_1": h_1_full,
+        "h_0": h_0_full
+    }
 
 # -------------------------------------------------------
 # 主入口函数: NMMR_H_experiment
@@ -288,7 +326,8 @@ def NMMR_H_experiment(dataset_name: str,
                       data_configs: Dict[str, Any],
                       train_params: Dict[str, Any],
                       log_folder: Path,
-                      random_seed: int):
+                      random_seed: int,
+                      dataset = None):
     """
     运行 NMMR-H 实验 (求解 h 函数并计算 ATE)
     """
@@ -302,26 +341,43 @@ def NMMR_H_experiment(dataset_name: str,
     dataset_key = dataset_name.lower()
     train_params_copy = copy.deepcopy(train_params)
     base_params, search_space = _parse_optuna_space(train_params_copy)
-    
     n_splits = int(base_params.get('n_splits', 5))
-    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))
     
+    if dataset is not None:
+        ate_estimate, ate_values, h_preds = _run_cross_fitting(
+            data_name=dataset_key,
+            dataset=dataset,
+            n_splits=n_splits,
+            train_params=base_params,
+            data_configs=data_configs,
+            random_seed=random_seed,
+            log_folder=log_folder,
+            tag="external_cf",
+        )
+        return {
+            "POR": ate_estimate.item(),
+            "h_preds": h_preds
+        }
+    
+    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))
     final_train_params: Dict[str, Any] = {}
 
+    
     if dataset_key == 'sgd':
-        data_base_path = Path(data_configs['data_path'])
-        
         data_base_path = Path(data_configs['data_path'])
         n_trials = data_configs.get('n_trials',-1)
         n_samples = data_configs.get('n_samples',2000)
-
+        scenario = data_configs.get('scenario', 1) 
+        
         # 重复实验的时候不写入数据
         if n_trials > 0:
-            PIPW = []
+            POR = []
+            use_u = base_params['use_u_statistic']
+            loss_name = "u" if use_u == "true" else "v"
             for _ in range(1, n_trials + 1):
-                df = generate_data(n_samples=n_samples)
+                df = generate_data(n_samples=n_samples, scenario= scenario)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
-                ate_estimate, ate_values = _run_cross_fitting(
+                ate_estimate, ate_values, _= _run_cross_fitting(
                     data_name=dataset_key,
                     dataset=dataset_trial,
                     n_splits=n_splits,
@@ -331,9 +387,9 @@ def NMMR_H_experiment(dataset_name: str,
                     log_folder=log_folder,
                     tag="sgd_cf",
                 )
-                PIPW.append(ate_estimate.item())
+                POR.append(ate_estimate.item())
             results = pd.DataFrame({
-                "PIPW": PIPW
+                "POR": POR
             })
             print(f"\n--- SGD ATE 估计结果 (平均 over {n_trials} 次试验):")
             print(f"PIPW = {results['PIPW'].mean():.4f}")
@@ -342,14 +398,13 @@ def NMMR_H_experiment(dataset_name: str,
             output_path = data_configs.get('output_path', 'predicts/sgd/nmmr_q')
             output_path = Path(output_path)
             output_path.mkdir(parents=True, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            out_file = output_path / f"nmmr_q_{timestamp}.csv"
+            out_file = output_path / f"por_{loss_name}_s{scenario}.csv"
             results.to_csv(out_file, index=False)
             
             
         else:
-            train_df = generate_data(n_samples=n_samples)
-            cf_df = generate_data(n_samples=n_samples)
+            train_df = generate_data(n_samples=n_samples, scenario=scenario)
+            cf_df = generate_data(n_samples=n_samples, scenario=scenario)
 
             output_dir = data_base_path
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +450,8 @@ def NMMR_H_experiment(dataset_name: str,
 
 
         print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
-        ate_estimate, ate_values = _run_cross_fitting(
+        ate_estimate, ate_values, _ = _run_cross_fitting(
+            data_name=dataset_key,
             dataset=cf_dataset,
             n_splits=n_splits,
             train_params=final_train_params,
@@ -442,6 +498,7 @@ def NMMR_H_experiment(dataset_name: str,
         print(f"     全量数据样本数: {len(full_dataset)}")
 
         ate_estimate, ate_values = _run_cross_fitting(
+            data_name=dataset_key,
             dataset=full_dataset,
             n_splits=n_splits,
             train_params=final_train_params,

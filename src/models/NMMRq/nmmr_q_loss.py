@@ -9,6 +9,7 @@ class NMMR_Q_Loss(nn.Module):
     
     def __init__(self, 
                  use_u_statistic=False):
+
         super(NMMR_Q_Loss, self).__init__()
         self.use_u_statistic = use_u_statistic
 
@@ -20,7 +21,7 @@ class NMMR_Q_Loss(nn.Module):
 
         if mask_sub.sum() > 0:
             residuals[mask_sub] = q_pred_sub - 1.0
-            
+
         if self.use_u_statistic:
 
             kernel_matrix_na = kernel_matrix.fill_diagonal_(0)

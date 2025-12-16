@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 import pandas as pd
 from pathlib import Path
+from typing import List
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "right_heart_catheterization"
 ALL_FEATURE_FILE = "RHC_X_allfeatures_list.csv"
@@ -89,15 +90,21 @@ class RHCDataset(Dataset):
 
 
 class SGDDataset(Dataset):
-    def __init__(self, csv_path, device='cpu', dtype=torch.float32):
-        df = pd.read_csv(csv_path)
-        self.X = torch.tensor(df[['X1', 'X2']].values, dtype=dtype, device=device)
-        self.A = torch.tensor(df['A'].values, dtype=dtype, device=device).unsqueeze(1)
-        self.Z = torch.tensor(df['Z'].values, dtype=dtype, device=device).unsqueeze(1)
-        self.W = torch.tensor(df['W'].values, dtype=dtype, device=device).unsqueeze(1)
-        self.U = torch.tensor(df['U'].values, dtype=dtype, device=device).unsqueeze(1)
-        self.Y = torch.tensor(df['Y'].values, dtype=dtype, device=device).unsqueeze(1)
-
+    def __init__(self, csv_path, device='cpu', dtype=torch.float32, df: pd.DataFrame | None = None):
+        if df is not None:
+            self.data = df
+        else:
+            self.data = pd.read_csv(csv_path)
+        self.X = torch.tensor(self.data[['X1', 'X2']].values, dtype=dtype, device=device)
+        self.A = torch.tensor(self.data['A'].values, dtype=dtype, device=device).unsqueeze(1)
+        self.Z = torch.tensor(self.data['Z'].values, dtype=dtype, device=device).unsqueeze(1)
+        self.W = torch.tensor(self.data['W'].values, dtype=dtype, device=device).unsqueeze(1)
+        self.Y = torch.tensor(self.data['Y'].values, dtype=dtype, device=device).unsqueeze(1)
+        if 'U' in self.data.columns:
+            self.U = torch.tensor(self.data['U'].values, dtype=torch.float32).unsqueeze(1).to(device)
+        else:
+            self.U = torch.zeros_like(self.A)
+            
     def __len__(self):
         return len(self.Y)
 
@@ -110,3 +117,37 @@ class SGDDataset(Dataset):
             'U': self.U[idx],
             'Y': self.Y[idx],
         }
+
+class MergedDataset(Dataset):
+    """
+    将多个 Dataset 对象（需具有 A, W, Z, X, Y 属性）合并为一个大的 Dataset。
+    用于解决 ConcatDataset 无法暴露 .A, .X 等属性给 _build_dataset_view 使用的问题。
+    """
+    def __init__(self, datasets: List[Dataset]):
+        # 假设所有 dataset 都在同一设备上，直接拼接 Tensor
+        self.A = torch.cat([d.A for d in datasets], dim=0)
+        self.W = torch.cat([d.W for d in datasets], dim=0)
+        self.Z = torch.cat([d.Z for d in datasets], dim=0)
+        self.X = torch.cat([d.X for d in datasets], dim=0)
+        self.Y = torch.cat([d.Y for d in datasets], dim=0)
+        
+        # RHC 数据集通常没有 U，SGD 有。如果有 U 则拼接，没有则置 None
+        if hasattr(datasets[0], 'U') and datasets[0].U is not None:
+            self.U = torch.cat([d.U for d in datasets], dim=0)
+        else:
+            self.U = None
+
+    def __len__(self):
+        return self.A.shape[0]
+
+    def __getitem__(self, idx):
+        item = {
+            'A': self.A[idx],
+            'W': self.W[idx],
+            'Z': self.Z[idx],
+            'X': self.X[idx],
+            'Y': self.Y[idx],
+        }
+        if self.U is not None:
+            item['U'] = self.U[idx]
+        return item

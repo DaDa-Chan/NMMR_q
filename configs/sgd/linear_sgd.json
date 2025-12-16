@@ -1,0 +1,8 @@
+{
+  "data_configs": {
+    "sgd": {
+      "n_samples":2000,
+      "n_trials": 50
+    }
+  }
+}

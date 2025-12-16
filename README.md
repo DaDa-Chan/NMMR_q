@@ -51,6 +51,13 @@ python src/experiment.py \
   --dump_folder results
 ```
 
+```bash
+python double_rob.py \
+  --dataset_name sgd \
+  --trails 100 \
+  --n_samples 2000
+```
+
 运行时脚本会：
 1. 解析配置并设置随机种子。
 2. 根据数据集选择流程：SGD 先在 `sgd_train.csv` 做 K-fold 交叉验证，再在 `sgd_cf.csv` 上 cross fitting；RHC 直接 cross fitting（可通过配置的 `cf_split`/`use_all_X` 控制）。

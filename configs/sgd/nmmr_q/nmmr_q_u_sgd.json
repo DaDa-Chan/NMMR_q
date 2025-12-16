@@ -1,0 +1,37 @@
+{
+  "data_configs": {
+    "sgd": {
+      "data_path": "/Users/chen/Study/CI/NMMR_q/data/SGD",
+      "n_samples": 2000
+    }
+  },
+  "train_params": {
+    "model_name": "nmmr_q",
+    "loss_name": "U_statistic",
+    "n_epochs": 100,
+    "batch_size": 200,
+    "n_splits":5,
+    "log_metrics": "True",
+    "network_depth": 4,
+    "use_u_statistic": false,
+    "kernel_gamma": 1.0,
+    "hpo_n_trials":50,
+
+    "learning_rate": {
+        "type":"float",
+        "low":1e-4,
+        "high":1e-2,
+        "log":true
+    },
+    "network_width": {
+        "type":"categorical",
+        "choices":[40, 60, 80, 120]
+    },
+    "l2_penalty": {
+        "type": "float",
+        "low": 1e-8,
+        "high": 1e-4,
+        "log": true
+    }
+  }
+}

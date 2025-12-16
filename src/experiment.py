@@ -17,7 +17,8 @@ if str(project_root) not in sys.path:
 
 # 导入新的实验函数
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment
-
+from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment
+from src.models.LINEAR.linear_model import LINEAR_experiment
 
 
 def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
@@ -38,7 +39,10 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
     data_configs = config_json['data_configs'][dataset_name]
 
     # 加载训练参数
-    train_params = config_json['train_params']
+    if 'train_params' not in config_json:
+        train_params = {}
+    else:
+        train_params = config_json['train_params']
     
     return data_configs, train_params
 
@@ -78,17 +82,17 @@ def main():
         help="要运行的随机种子的数量"
     )
     parser.add_argument(
-        '--dump_folder', 
+        '--log_folder', 
         type=str, 
-        default="results",
+        default="logs",
         help="保存结果的根文件夹"
     )
     # n_jobs 在 DataLoader 太需要，但为保持兼容性保留
     parser.add_argument(
-        '--n_jobs', 
-        type=int, 
-        default=1,
-        help="（未使用，为兼容性保留）"
+        '--predicts_path', 
+        type=str, 
+        default="predicts",
+        help="预测文件地址"
     )
     
     args = parser.parse_args()
@@ -99,9 +103,8 @@ def main():
 
     # 2. 创建结果文件夹
     config_name = Path(args.config_path).stem  # 例如 'nmmr_q_sgd_config'
-    experiment_dump_folder = Path(args.dump_folder) / args.dataset_name / args.model_name / config_name
-    
-    print(f"结果将保存到: {experiment_dump_folder}")
+    experiment_log_folder = Path(args.log_folder) / args.dataset_name / args.model_name / config_name
+    experiment_predicts_folder = Path(args.predicts_path) / args.dataset_name / args.model_name
 
     # 3. 循环运行多个随机种子
     for i in range(args.n_seeds):
@@ -109,8 +112,8 @@ def main():
         print(f"\n--- 开始运行 Seed {random_seed + 1} / {args.n_seeds} ---")
         
         # 为当前种子创建子文件夹
-        seed_dump_folder = experiment_dump_folder / str(random_seed)
-        seed_dump_folder.mkdir(parents=True, exist_ok=True)
+        seed_log_folder = experiment_log_folder / str(random_seed)
+        seed_log_folder.mkdir(parents=True, exist_ok=True)
         
         # 设置随机种子
         set_random_seed(random_seed)
@@ -121,12 +124,23 @@ def main():
                 dataset_name=args.dataset_name,
                 data_configs=data_configs,
                 train_params=train_params,
-                dump_folder=seed_dump_folder,
+                log_folder=seed_log_folder,
                 random_seed=random_seed
             )
-
+        elif args.model_name == 'nmmr_h':  
+            NMMR_H_experiment(
+                dataset_name=args.dataset_name,
+                data_configs=data_configs,
+                train_params=train_params,
+                log_folder=seed_log_folder,
+                random_seed=random_seed
+            )
+        elif args.model_name == 'linear':
+            LINEAR_experiment(
+                data_configs=data_configs
+            )       
         else:
-            print(f"警告: 未知的模型名称 '{args.model_name}'。跳过。")
+            print(f"Unknown model: {args.model_name}")
             
     print("\n所有实验运行完毕。")
 
