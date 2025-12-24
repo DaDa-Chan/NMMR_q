@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Tuple
 import numpy as np
+from datetime import datetime
 import torch
 
 # --- 添加项目根目录到 Python 路径 ---
@@ -15,9 +16,8 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 # ----------------------------------------
 
-# 导入新的实验函数
-from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment
-from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment
+from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment, train_q_standalone
+from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment, train_h_standalone
 from src.models.LINEAR.linear_model import LINEAR_experiment
 
 
@@ -46,6 +46,7 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
     
     return data_configs, train_params
 
+
 def set_random_seed(seed: int):
     """设置所有库的随机种子"""
     torch.manual_seed(seed)
@@ -53,6 +54,8 @@ def set_random_seed(seed: int):
     random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -87,12 +90,23 @@ def main():
         default="logs",
         help="保存结果的根文件夹"
     )
-    # n_jobs 在 DataLoader 太需要，但为保持兼容性保留
     parser.add_argument(
         '--predicts_path', 
         type=str, 
         default="predicts",
         help="预测文件地址"
+    )   
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='cross_fitting',
+        help="运行的模式: 'cross_fitting' (train on folds) or 'traditional' (load pretrained model)"
+    )
+    parser.add_argument(
+        '--model_dir',
+        type=str,
+        default='saved_models',
+        help="预训练模型存放目录 (仅在 mode='traditional' 时使用)"
     )
     
     args = parser.parse_args()
@@ -103,13 +117,14 @@ def main():
 
     # 2. 创建结果文件夹
     config_name = Path(args.config_path).stem  # 例如 'nmmr_q_sgd_config'
-    experiment_log_folder = Path(args.log_folder) / args.dataset_name / args.model_name / config_name
+    suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_log_folder = Path(args.log_folder) / args.dataset_name / args.model_name / config_name / suffix
     experiment_predicts_folder = Path(args.predicts_path) / args.dataset_name / args.model_name
 
     # 3. 循环运行多个随机种子
     for i in range(args.n_seeds):
-        random_seed = i
-        print(f"\n--- 开始运行 Seed {random_seed + 1} / {args.n_seeds} ---")
+        random_seed = i+42
+        print(f"\n--- 开始运行 Seed {random_seed}---")
         
         # 为当前种子创建子文件夹
         seed_log_folder = experiment_log_folder / str(random_seed)
@@ -118,31 +133,62 @@ def main():
         # 设置随机种子
         set_random_seed(random_seed)
         
-        # 根据模型名称调用相应的实验函数
-        if args.model_name == 'nmmr_q':
-            NMMR_Q_experiment(
-                dataset_name=args.dataset_name,
-                data_configs=data_configs,
-                train_params=train_params,
-                log_folder=seed_log_folder,
-                random_seed=random_seed
-            )
-        elif args.model_name == 'nmmr_h':  
-            NMMR_H_experiment(
-                dataset_name=args.dataset_name,
-                data_configs=data_configs,
-                train_params=train_params,
-                log_folder=seed_log_folder,
-                random_seed=random_seed
-            )
-        elif args.model_name == 'linear':
-            LINEAR_experiment(
-                data_configs=data_configs
-            )       
-        else:
-            print(f"Unknown model: {args.model_name}")
+        if args.mode == 'traditional':
+            print("模式: 传统 (加载预训练模型)")
+            if args.model_name == 'nmmr_q':
+                train_q_standalone(
+                    data_configs, 
+                    train_params,
+                    dataset_name=args.dataset_name,
+                    scenario=data_configs.get('scenario', 1),
+                    save_dir=args.model_dir,
+                    log_folder=seed_log_folder,
+                    random_seed=random_seed
+                )
+            elif args.model_name == 'nmmr_h':
+                train_h_standalone(
+                    data_configs, 
+                    train_params,
+                    dataset_name=args.dataset_name,
+                    scenario=data_configs.get('scenario', 1),
+                    save_dir=args.model_dir,
+                    log_folder=seed_log_folder,
+                    random_seed=random_seed
+                )
             
-    print("\n所有实验运行完毕。")
+        else:
+            if args.model_name == 'nmmr_q':
+                NMMR_Q_experiment(
+                    dataset_name=args.dataset_name,
+                    data_configs=data_configs,
+                    train_params=train_params,
+                    log_folder=seed_log_folder,
+                    random_seed=random_seed
+                )
+            elif args.model_name == 'nmmr_h':  
+                NMMR_H_experiment(
+                    dataset_name=args.dataset_name,
+                    data_configs=data_configs,
+                    train_params=train_params,
+                    log_folder=seed_log_folder,
+                    random_seed=random_seed
+                )
+            elif args.model_name == 'nmmr_h':  
+                NMMR_H_experiment(
+                    dataset_name=args.dataset_name,
+                    data_configs=data_configs,
+                    train_params=train_params,
+                    log_folder=seed_log_folder,
+                    random_seed=random_seed
+                )
+            elif args.model_name == 'linear':  
+                LINEAR_experiment(
+                    data_configs=data_configs
+                )       
+            else:
+                print(f"Unknown model: {args.model_name}")
+            
+            print("\n所有实验运行完毕。")
 
 if __name__ == '__main__':
     main()

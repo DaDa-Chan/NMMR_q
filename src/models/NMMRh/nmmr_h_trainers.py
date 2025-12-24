@@ -1,6 +1,7 @@
 import os.path as op
 from typing import Optional, Dict, Any
 from pathlib import Path
+import copy
 
 import torch
 import torch.optim as optim
@@ -12,7 +13,6 @@ from torch.cuda.amp import GradScaler, autocast
 
 from src.models.NMMRh.nmmr_h_loss import NMMR_H_Loss
 from src.models.NMMRh.nmmr_h_model import MLP_for_NMMR
-
 from src.models.NMMRh.kernel_h_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 
 def _resolve_dataset(dataset):
@@ -24,6 +24,45 @@ def _select_rows(tensor, indices):
     if indices is None:
         return tensor
     return tensor[indices]
+
+class EarlyStopping:
+    """
+    当验证集 loss 在 patience 个 epoch 内没有提升时停止训练
+    """
+    def __init__(self, patience=10, min_delta=0.0):
+        """
+        Args:
+            patience (int): 上次 loss 改善后等待的 epoch 数。默认 10。
+            min_delta (float): 被视为提升的最小变化量。小于此值的变化被视为无提升。
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.best_model_state = None
+
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.save_checkpoint(val_loss, model)
+        elif val_loss > self.best_loss - self.min_delta:
+            # Loss 没有显著下降 (大于 最佳Loss - 阈值)
+            self.counter += 1
+            # print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            # Loss 下降了
+            self.best_loss = val_loss
+            self.save_checkpoint(val_loss, model)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model):
+        '''保存当前最佳模型参数'''
+        self.best_model_state = copy.deepcopy(model.state_dict())
+
 
 class NMMR_H_Trainer:
     def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
@@ -37,8 +76,7 @@ class NMMR_H_Trainer:
         self.l2_penalty = train_params['l2_penalty']
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
-        
-        # Kernel Gamma
+
         self.kernel_gamma = train_params.get('kernel_gamma', 1.0)
 
         self.scaler = GradScaler() if self.gpu_flg else None
@@ -82,7 +120,7 @@ class NMMR_H_Trainer:
         
         train_dataset, train_indices = _resolve_dataset(train_loader.dataset)
         val_dataset, val_indices = _resolve_dataset(val_loader.dataset)
-
+        
         A_dim = train_dataset.A.shape[1]
         W_dim = train_dataset.W.shape[1]
         X_dim = train_dataset.X.shape[1]
@@ -95,11 +133,15 @@ class NMMR_H_Trainer:
 
         optimizer = optim.Adam(list(model.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
 
+        patience = self.train_params.get('patience', 20) 
+        early_stopping = EarlyStopping(patience=patience, min_delta=1e-5)
+        
+
         for epoch in tqdm(range(self.n_epochs), desc="Epochs", disable=not verbose):
             model.train()
             
             for batch_data in train_loader:
-
+                # 1. 准备数据
                 batch_A = batch_data['A'].to(self.device)
                 batch_W = batch_data['W'].to(self.device)
                 batch_Z = batch_data['Z'].to(self.device)
@@ -111,6 +153,7 @@ class NMMR_H_Trainer:
                 with torch.no_grad():
                     k_matrix = self._compute_kernel_matrix(batch_A, batch_Z, batch_X)
 
+ 
                 with autocast(enabled=self.gpu_flg):
 
                     model_input = torch.cat((batch_A, batch_W, batch_X), dim=1)
@@ -160,20 +203,31 @@ class NMMR_H_Trainer:
                     self.writer.add_scalar(f'{self.loss_name}/val', val_loss, epoch)
                     self.causal_val_losses.append(val_loss.item() if torch.is_tensor(val_loss) else val_loss)
 
+                early_stopping(val_loss.item(), model)
+                
+                if early_stopping.early_stop:
+                    model.load_state_dict(early_stopping.best_model_state)
+                    if verbose:
+                        print(f"\n[Early Stopping] 在 Epoch {epoch} 停止训练。")
+                        print(f"最佳验证集 Loss: {early_stopping.best_loss:.6f}")
+                    break # 跳出 epoch 循环
         return model
 
     @staticmethod
     def predict(model: MLP_for_NMMR, dataset_view):
         """
+        NMMR (h) 的 ATE 预测逻辑：
         ATE = E[Y(1) - Y(0)] = E[h(1, W, X) - h(0, W, X)]
         """
         model.eval()
         model_device = next(model.parameters()).device
-
+        
+        # 获取数据
         W = dataset_view.W.to(model_device)
         X = dataset_view.X.to(model_device)
         N = W.shape[0]
-
+        
+        # 构造反事实输入 A=1 和 A=0
         ones = torch.ones((N, 1), device=model_device)
         zeros = torch.zeros((N, 1), device=model_device)
         

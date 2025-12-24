@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
 
-from src.models.NMMRh.nmmr_h_trainers import NMMR_H_Trainer_SGD, NMMR_H_Trainer_RHC
+from src.models.NMMRh.nmmr_h_trainers import NMMR_H_Trainer, NMMR_H_Trainer_SGD, NMMR_H_Trainer_RHC, MLP_for_NMMR 
+from src.models.NMMRh.nmmr_h_model import MLP_for_NMMR
 from src.data.ate.sgd_pv import generate_data
 from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset
 
@@ -115,11 +116,13 @@ def _build_loaders_for_fold(dataset, indices: List[int], batch_size: int, seed: 
     return train_loader, val_loader
 
 def _build_dataset_view(dataset, indices: List[int]):
-
+    """
+    构建数据视图，用于评估和预测
+    修复版本：移除了严格的长度检查，防止因 dataset 长度与 tensor 维度元数据不一致导致的静默零填充问题。
+    """
     if len(indices) == 0:
         raise ValueError("评估折没有样本。")
-    
-    # 获取参考 tensor 以确定 device 和 dtype
+
     reference_tensor = getattr(dataset, 'X', getattr(dataset, 'A', None))
     base_device = reference_tensor.device if isinstance(reference_tensor, torch.Tensor) else torch.device('cpu')
     default_dtype = reference_tensor.dtype if isinstance(reference_tensor, torch.Tensor) else torch.float32
@@ -130,12 +133,11 @@ def _build_dataset_view(dataset, indices: List[int]):
 
     for attr in ['X', 'A', 'Z', 'W', 'U', 'Y']:
         tensor = getattr(dataset, attr, None)
-        
+
         if tensor is not None:
             try:
                 setattr(view, attr, tensor.index_select(0, index_tensor))
             except RuntimeError:
-
                 setattr(view, attr, torch.zeros((target_len, 1), device=base_device, dtype=default_dtype))
         else:
 
@@ -144,6 +146,9 @@ def _build_dataset_view(dataset, indices: List[int]):
     return view
 
 def _evaluate_h_loss(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> float:
+    """
+    计算验证集上的 H-Loss (用于 HPO)
+    """
     view = _build_dataset_view(dataset, indices)
     with torch.no_grad():
         A = view.A.to(trainer.device)
@@ -151,16 +156,12 @@ def _evaluate_h_loss(trainer, model: torch.nn.Module, dataset, indices: List[int
         Z = view.Z.to(trainer.device)
         X = view.X.to(trainer.device)
         Y = view.Y.to(trainer.device)
-        
-        # 1. 计算 Kernel (定义在 A, Z, X 上)
+
         k_matrix = trainer._compute_kernel_matrix(A, Z, X)
-        
-        # 2. 前向传播 h(A, W, X)
-        # 输入拼接顺序需与 Trainer 保持一致: cat(A, W, X)
+
         model_input = torch.cat((A, W, X), dim=1)
         pred = model(model_input)
-        
-        # 3. 计算 Loss
+
         loss = trainer.h_loss(pred, Y, k_matrix)
             
     return float(loss.item())
@@ -174,7 +175,14 @@ def _run_optuna_tuning(
     search_space: Dict[str, Any],
     data_configs: Dict[str, Any],
     random_seed: int,
+    log_folder: Optional[Path] = None,
+    save_dir: Optional[Path] = None,   
+    scenario: Optional[int] = 1    
 ) -> Dict[str, Any]:
+    """
+    1.在给定数据集上执行 K-fold CV 以进行 Optuna 调参。返回最优的超参数组合。
+    2.如果提供了 save_dir, 则使用最佳参数在全量 dataset 上重新训练并保存模型。
+    """
     
     if not search_space:
         print("[Optuna] 未提供搜索空间，跳过调优。")
@@ -196,7 +204,8 @@ def _run_optuna_tuning(
 
         for fold_idx, (train_idx, val_idx) in enumerate(
             cv_kfold.split(np.arange(len(dataset))), start=1
-        ):
+            ):
+            
             trainer = _create_trainer(
                 data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
             )
@@ -229,6 +238,35 @@ def _run_optuna_tuning(
     print(f"  最佳参数: {study.best_params}")
     
     final_best_params = {**base_train_params, **study.best_params}
+    if save_dir is not None:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        print("\n[Refit] 使用最佳参数在全量数据上训练最终模型...")
+        
+        batch_size = final_best_params['batch_size']
+        full_train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        full_val_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False) 
+
+        refit_dump_folder = log_folder if log_folder else None
+
+        final_trainer = _create_trainer(
+            data_configs=data_configs,
+            train_params=final_best_params, # 使用最佳参数
+            random_seed=random_seed,
+            dump_folder=refit_dump_folder, 
+            data_name=data_name
+        )
+
+        final_model = final_trainer.train(full_train_loader, full_val_loader, verbose=1)
+
+        stat_type = "u" if str(final_best_params.get('use_u_statistic', 'false')).lower() == 'true' else "v"
+        model_filename = f"nmmr_h_{data_name}_{stat_type}_s{scenario}.pth"     
+        torch.save(final_model.state_dict(), save_path / model_filename)
+                   
+        print(f"[Save] 模型已保存: {save_path / model_filename}")
+
     return final_best_params
 
 def _run_cross_fitting(data_name:str,
@@ -248,8 +286,7 @@ def _run_cross_fitting(data_name:str,
     
     indices = np.arange(len(dataset))
     dataset_len = len(dataset)
-    
-    # 存储预测结果
+
     h_fact_full = np.zeros((dataset_len, 1), dtype=np.float32)
     h_1_full = np.zeros((dataset_len, 1), dtype=np.float32)
     h_0_full = np.zeros((dataset_len, 1), dtype=np.float32)
@@ -318,6 +355,60 @@ def _run_cross_fitting(data_name:str,
         "h_0": h_0_full
     }
 
+def _run_traditional_prediction(
+    dataset,
+    train_params: Dict[str, Any],
+    model_path: Path,
+    device: str
+) -> Tuple[torch.Tensor, Dict]:
+    
+    if not model_path.exists():
+        raise FileNotFoundError(f"Trained model not found at: {model_path}")
+    
+    print(f"[Traditional] Loading model from {model_path}")
+    
+
+    W_dim = dataset.W.shape[1]
+    X_dim = dataset.X.shape[1]
+    input_size = 1 + W_dim + X_dim  
+    
+    model = MLP_for_NMMR(input_dim = input_size, train_params=train_params)
+    
+    state_dict = torch.load(model_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    
+    full_view = _build_dataset_view(dataset, list(range(len(dataset))))
+    
+    ate_val = NMMR_H_Trainer.predict(model, full_view)
+    
+    with torch.no_grad():
+            W = full_view.W.to(device)
+            X = full_view.X.to(device)
+            A = full_view.A.to(device)
+            
+            # Factual h(A, W, X)
+            inputs_fact = torch.cat((A, W, X), dim=1)
+            h_fact = model(inputs_fact)
+            
+            # Counterfactual h(1, W, X)
+            inputs_1 = torch.cat((torch.ones_like(A), W, X), dim=1)
+            h_1 = model(inputs_1)
+            
+            # Counterfactual h(0, W, X)
+            inputs_0 = torch.cat((torch.zeros_like(A), W, X), dim=1)
+            h_0 = model(inputs_0)
+            
+            h_fact_full = h_fact.cpu().numpy()
+            h_1_full = h_1.cpu().numpy()
+            h_0_full = h_0.cpu().numpy()
+            
+    return ate_val, {
+        "h_fact": h_fact_full,
+        "h_1": h_1_full,
+        "h_0": h_0_full
+    }
 # -------------------------------------------------------
 # 主入口函数: NMMR_H_experiment
 # -------------------------------------------------------
@@ -327,18 +418,33 @@ def NMMR_H_experiment(dataset_name: str,
                       train_params: Dict[str, Any],
                       log_folder: Path,
                       random_seed: int,
-                      dataset = None):
+                      dataset = None,
+                      mode: str = 'cross_fitting',
+                      model_dir: Optional[Path] = None
+                      ):
     """
     运行 NMMR-H 实验 (求解 h 函数并计算 ATE)
     """
-    print(f"--- 运行 NMMR-H 实验 ---")
-    print(f"数据集: {dataset_name}")
-    print(f"随机种子: {random_seed}")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"使用设备: {device}")
 
     dataset_key = dataset_name.lower()
+    
+    if mode == 'traditional':
+        if model_dir is None:
+            raise ValueError("In 'traditional' mode, 'model_path' must be provided.")
+            
+        ate_val, h_preds = _run_traditional_prediction(
+            dataset=dataset,
+            train_params=train_params, 
+            model_path=model_dir,
+            device=device
+        )
+        return {
+            "POR": ate_val.item(),
+            "h_preds": h_preds
+        }
+    
     train_params_copy = copy.deepcopy(train_params)
     base_params, search_space = _parse_optuna_space(train_params_copy)
     n_splits = int(base_params.get('n_splits', 5))
@@ -368,8 +474,7 @@ def NMMR_H_experiment(dataset_name: str,
         n_trials = data_configs.get('n_trials',-1)
         n_samples = data_configs.get('n_samples',2000)
         scenario = data_configs.get('scenario', 1) 
-        
-        # 重复实验的时候不写入数据
+
         if n_trials > 0:
             POR = []
             use_u = base_params['use_u_statistic']
@@ -447,7 +552,8 @@ def NMMR_H_experiment(dataset_name: str,
         else:
             print("\n===> 使用固定默认参数")
             final_train_params = base_params
-
+            
+        final_train_params['n_epochs'] += 200
 
         print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
         ate_estimate, ate_values, _ = _run_cross_fitting(
@@ -468,11 +574,9 @@ def NMMR_H_experiment(dataset_name: str,
 
         print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
         
-        # 1. 加载数据
-        # HPO 使用 Train
+
         train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        
-        # 2. HPO (Train Split)
+
         if search_space:
             print("\n===> [RHC] 开始训练集 K-fold HPO")
             final_train_params = _run_optuna_tuning(
@@ -488,12 +592,10 @@ def NMMR_H_experiment(dataset_name: str,
             print("\n===> [RHC] 跳过 HPO，使用默认参数")
             final_train_params = base_params
 
-        # 3. Cross Fitting (Full Dataset)
         print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
         val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
         test_dataset = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        
-        # 使用 MergedDataset
+
         full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
         print(f"     全量数据样本数: {len(full_dataset)}")
 
@@ -514,3 +616,53 @@ def NMMR_H_experiment(dataset_name: str,
     print(f"\n--- 最终 ATE(POR) (Seed {random_seed}) ---")
     print(f"ATE(POR) = {ate_estimate.item():.4f}")
     print("----------------------------------")
+
+def train_h_standalone(data_configs, train_params, dataset_name, scenario, save_dir, log_folder, random_seed=42):
+    
+    """
+    独立训练模式：
+    1. 加载/生成数据
+    2. (可选) 使用 Optuna 进行 K-Fold 调参
+    3. 使用最佳参数在全量数据上训练
+    4. 保存模型权重和最佳参数配置
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n[Standalone_h] 启动独立训练流程 | 数据集: {dataset_name} | Scenario: {scenario}")
+    
+    dataset_key = dataset_name.lower()
+    if dataset_key == 'sgd':
+        n_samples = data_configs.get('n_samples',2000)
+        df = generate_data(n_samples=n_samples, scenario=scenario)
+        train_dataset = SGDDataset(csv_path='', df=df, device=device)
+        
+    elif dataset_key == 'rhc':
+        print(f"[Standalone] 加载 RHC 训练数据...")
+        data_dir = data_configs.get('data_path')
+        use_all_x = data_configs.get('use_all_X', False)
+        train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=data_dir, device=device)
+    else:
+        raise ValueError(f"未知的 dataset_name: {dataset_name}")
+    
+    
+    train_params_copy = copy.deepcopy(train_params)
+    base_params, search_space = _parse_optuna_space(train_params_copy)
+    n_splits = int(base_params.get('n_splits', 5))
+
+    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))  
+
+    _run_optuna_tuning(
+        data_name=dataset_key,
+        dataset=train_dataset,
+        n_splits=n_splits,
+        n_trials=hpo_n_trials,
+        base_train_params=base_params,
+        search_space=search_space,
+        data_configs=data_configs,
+        random_seed=random_seed,
+        log_folder=log_folder,
+        save_dir=save_dir,      
+        scenario=scenario       
+    )

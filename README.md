@@ -74,7 +74,7 @@ python double_rob.py \
 cd /Path/to/NMMR_q
 
 # 指定 logdir 指向保存日志的目录，示例为 SGD 运行的某个随机种子
-tensorboard --logdir results/sgd/nmmr_q/nmmr_q_v_sgd/42/tensorboard_log_42 --port 6006
+tensorboard --logdir logs/sgd/nmmr_q/nmmr_q_v_sgd/0/tensorboard_log_42 --port 6006
 ```
 
 启动后在浏览器打开 `http://localhost:6006` 即可查看损失曲线与其他标量。若存在多个实验，可将 `--logdir` 指向更高层目录（如 `results/sgd/nmmr_q`）从而对比不同配置。

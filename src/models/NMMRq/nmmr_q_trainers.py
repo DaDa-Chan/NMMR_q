@@ -1,6 +1,8 @@
 import os.path as op
 from typing import Optional, Dict, Any
 from pathlib import Path
+import copy
+import datetime
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -12,7 +14,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
-from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
+from src.models.NMMRq.nmmr_q_model import NMMR_Q_common, NMMR_Q_DualModel
 from src.models.NMMRq.kernel_q_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 
 
@@ -33,23 +35,42 @@ def _select_rows(tensor, indices):
         return tensor
     return tensor[indices]
 
-class NMMR_Q_DualModel(nn.Module):
-    
-    def __init__(self, net0, net1):
-        super().__init__()
-        self.net0 = net0
-        self.net1 = net1
-    
-    def forward(self, z, x, a=None):
-        inputs = torch.cat((z, x), dim=1)
-        pred0 = self.net0(inputs)
-        pred1 = self.net1(inputs)
-        
-        if a is not None:
-            return torch.where(a > 0.5, pred1, pred0)
-        else:
-            return pred0, pred1
+class EarlyStopping:
+    """
+    当验证集 loss 在 patience 个 epoch 内没有提升时停止训练
+    """
+    def __init__(self, patience=10, min_delta=0.0):
+        """
+        Args:
+            patience (int): 上次 loss 改善后等待的 epoch 数。默认 10。
+            min_delta (float): 被视为提升的最小变化量。小于此值的变化被视为无提升。
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.best_model0_state = None
+        self.best_model1_state = None
 
+    def __call__(self, val_loss, model0, model1):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.save_checkpoint(val_loss, model0, model1)
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            # Loss 下降了
+            self.best_loss = val_loss
+            self.save_checkpoint(val_loss, model0, model1)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model0, model1):
+        '''保存当前最佳模型参数'''
+        self.best_model0_state = copy.deepcopy(model0.state_dict())
+        self.best_model1_state = copy.deepcopy(model1.state_dict())
 
 class NMMR_Q_Trainer:
     def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
@@ -65,9 +86,6 @@ class NMMR_Q_Trainer:
         self.loss_name = train_params['loss_name']
         self.scaler = GradScaler() if self.gpu_flg else None
         self.kernel_gamma = train_params['kernel_gamma']
-        '''
-        记录设备信息并实例化 q-损失，确保与 kernel/loss 配置一致
-        '''
         self.device = torch.device('cuda' if self.gpu_flg else 'cpu')
         self.q_loss = NMMR_Q_Loss(
             use_u_statistic=self.train_params.get('use_u_statistic', False),
@@ -90,7 +108,8 @@ class NMMR_Q_Trainer:
         N = w.shape[0]
         wx_group = torch.cat([w, x], dim=1)  # [N, D]
         sigma_data = fit_sigma(wx_group)
-
+        
+        # 使用 kernel_utils 中的函数计算全矩阵
         k_matrix = calculate_kernel_matrix_batched(
             dataset=wx_group,
             batch_indices=(0, N),
@@ -123,16 +142,16 @@ class NMMR_Q_Trainer:
 
         optimizer0 = optim.Adam(list(model0.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
         optimizer1 = optim.Adam(list(model1.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
+ 
+        patience = self.train_params.get('patience', 20) 
+        early_stopping = EarlyStopping(patience=patience, min_delta=5e-5)
 
-        print(f"开始训练 NMMR_Q (q0, q1)模型, 输入维度: {input_size}")
-        
-        # 训练模型
         for epoch in tqdm(range(self.n_epochs), desc="Epochs", disable=not verbose):
-            # 设置模型为训练模式
+
             model0.train() 
             model1.train()
             
-            # DataLoader 循环
+            
             for batch_data in train_loader:
                 
                 '''
@@ -146,8 +165,7 @@ class NMMR_Q_Trainer:
                 with torch.no_grad():
                     kernel_matrix = self._compute_kernel_matrix(batch_W, batch_X)
                 
-                
-                # --- 分割数据分别训练 ---
+
                 mask0 = (batch_A < 0.5).squeeze()
                 if mask0.sum() > 1:
                     optimizer0.zero_grad()       
@@ -255,13 +273,24 @@ class NMMR_Q_Trainer:
                     
                     self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val_full, epoch)
                     self.causal_val_losses.append(causal_loss_val_full.item()) # .item()
-
+                
+                early_stopping(causal_loss_val_full.item(), model0, model1)
+                
+                if early_stopping.early_stop:
+                    model0.load_state_dict(early_stopping.best_model0_state)
+                    model1.load_state_dict(early_stopping.best_model1_state)
+                    if verbose:
+                        print(f"\n[Early Stopping] 在 Epoch {epoch} 停止训练。")
+                        print(f"最佳验证集 Loss: {early_stopping.best_loss:.6f}")
+                    break # 跳出 epoch 循环
+        #print("训练完成。")
         return NMMR_Q_DualModel(model0, model1)
 
     @staticmethod
     def predict(model: NMMR_Q_DualModel, dataset_view):
         """
-        φ̂_U(V) = (1/n) ∑ (-1)^{1-a_i} q̂_U(V)(a_i, x_i, z_i) y_i 
+        按照 φ̂_U(V) = (1/n) ∑ (-1)^{1-a_i} q̂_U(V)(a_i, x_i, z_i) y_i 的形式
+        对给定数据集计算估计值。
         """
         model.eval()
 
@@ -270,20 +299,23 @@ class NMMR_Q_Trainer:
         Z_samples = dataset_view.Z.to(model_device)
         X_samples = dataset_view.X.to(model_device)
         Y_samples = dataset_view.Y.to(model_device)
-   
+
+        
         with torch.no_grad():
 
             q_hat = model(Z_samples, X_samples, A_samples)
 
-        # (-1)^{1-a_i}: a=1 -> 1, a=0 -> -1
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
 
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()
     
+    
+    
 class NMMR_Q_Trainer_SGD(NMMR_Q_Trainer):
     pass
         
 class NMMR_Q_Trainer_RHC(NMMR_Q_Trainer):
+
     pass
