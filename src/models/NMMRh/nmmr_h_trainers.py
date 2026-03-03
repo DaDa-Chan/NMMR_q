@@ -132,6 +132,13 @@ class NMMR_H_Trainer:
             model.cuda()
 
         optimizer = optim.Adam(list(model.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
+        
+        sched_patience = self.train_params.get('scheduler_patience', 5)
+        sched_factor = self.train_params.get('scheduler_factor', 0.5)
+        
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=sched_factor, patience=sched_patience, min_lr=1e-6
+        )
 
         patience = self.train_params.get('patience', 20) 
         early_stopping = EarlyStopping(patience=patience, min_delta=1e-5)
@@ -203,6 +210,7 @@ class NMMR_H_Trainer:
                     self.writer.add_scalar(f'{self.loss_name}/val', val_loss, epoch)
                     self.causal_val_losses.append(val_loss.item() if torch.is_tensor(val_loss) else val_loss)
 
+                scheduler.step(val_loss.item())
                 early_stopping(val_loss.item(), model)
                 
                 if early_stopping.early_stop:

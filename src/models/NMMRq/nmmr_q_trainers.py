@@ -142,6 +142,16 @@ class NMMR_Q_Trainer:
 
         optimizer0 = optim.Adam(list(model0.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
         optimizer1 = optim.Adam(list(model1.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
+        
+        sched_patience = self.train_params.get('scheduler_patience', 5)
+        sched_factor = self.train_params.get('scheduler_factor', 0.5)
+        
+        scheduler0 = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer0, mode='min', factor=sched_factor, patience=sched_patience, min_lr=1e-6
+        )
+        scheduler1 = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer1, mode='min', factor=sched_factor, patience=sched_patience, min_lr=1e-6
+        )
  
         patience = self.train_params.get('patience', 20) 
         early_stopping = EarlyStopping(patience=patience, min_delta=5e-5)
@@ -274,6 +284,8 @@ class NMMR_Q_Trainer:
                     self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val_full, epoch)
                     self.causal_val_losses.append(causal_loss_val_full.item()) # .item()
                 
+                scheduler0.step(causal_loss_val_full.item())
+                scheduler1.step(causal_loss_val_full.item())
                 early_stopping(causal_loss_val_full.item(), model0, model1)
                 
                 if early_stopping.early_stop:
