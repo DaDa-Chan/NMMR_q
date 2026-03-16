@@ -84,7 +84,7 @@ class NMMR_Q_Trainer:
         self.l2_penalty = train_params['l2_penalty']
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
-        self.scaler = GradScaler() if self.gpu_flg else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.gpu_flg else None
         self.kernel_gamma = train_params['kernel_gamma']
         self.device = torch.device('cuda' if self.gpu_flg else 'cpu')
         self.q_loss = NMMR_Q_Loss(
@@ -119,7 +119,7 @@ class NMMR_Q_Trainer:
         )
         return k_matrix
     
-    def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int = 1) -> NMMR_Q_common:
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int = 0) -> NMMR_Q_common:
         """
         训练NMMR_Q 模型。
         q0(Z, X) & q1(Z, X)
@@ -180,7 +180,7 @@ class NMMR_Q_Trainer:
                 if mask0.sum() > 1:
                     optimizer0.zero_grad()       
                     inputs0 = torch.cat((batch_Z[mask0], batch_X[mask0]), dim=1)
-                    with autocast(enabled=self.gpu_flg): 
+                    with torch.amp.autocast(device_type='cuda', enabled=self.gpu_flg):
                         pred0 = model0(inputs0)
                         loss0 = self.q_loss(
                             q_pred_sub=pred0,
@@ -199,7 +199,7 @@ class NMMR_Q_Trainer:
                 if mask1.sum() > 1:
                     optimizer1.zero_grad()
                     inputs1 = torch.cat((batch_Z[mask1], batch_X[mask1]), dim=1)
-                    with autocast(enabled=self.gpu_flg): 
+                    with torch.amp.autocast(device_type='cuda', enabled=self.gpu_flg):
                         pred1 = model1(inputs1)
                         loss1 = self.q_loss(
                             q_pred_sub=pred1,

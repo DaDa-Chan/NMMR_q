@@ -4,15 +4,18 @@ from pathlib import Path
 
 TRUE_ATE = 2
 
-def generate_data(n_samples=2000):
+def generate_data(n_samples=2000, scenario=1, seed=None):
+    
+    rng = np.random.default_rng(seed)
+    
     # -- X --
     gamma_x = np.array([0.25, 0.25])
     cov_x = np.array([[0.25**2, 0], [0, 0.25**2]])
-    X = np.random.multivariate_normal(gamma_x, cov_x, n_samples)
+    X = rng.multivariate_normal(gamma_x, cov_x, n_samples)
 
     # -- A --
     p_a = 1 / (1 + np.exp((0.125 * X[:, 0] + 0.125 * X[:, 1])))
-    A = np.random.binomial(1, p_a, n_samples)
+    A = rng.binomial(1, p_a, n_samples)
 
     mean_zwu = np.zeros((n_samples, 3))
     alpha_x = mu_x = kappa_x = np.array([0.25, 0.25])
@@ -38,22 +41,23 @@ def generate_data(n_samples=2000):
     # -- Y --
     Y = E_Y_given_W_U_A_Z_X + np.random.normal(0, 0.25, n_samples)
     
+    if scenario == 1:
+        pass
+    
+    elif scenario == 2:
+        W = np.abs(W)**0.5 + 3
+        
+    elif scenario == 3:
+        Z = np.abs(Z)**0.5 + 3
+        
+    elif scenario ==4:
+        W = np.abs(W)**0.5 + 1
+        Z = np.abs(Z)**0.5 + 1
+        
+    # print(f'''Data generated with scenario {scenario}.''')
+        
     return pd.DataFrame({'X1': X[:, 0], 'X2': X[:, 1], 'A': A, 'Z': Z, 'W': W, 'U': U, 'Y': Y})
 
-"""
- n_train = 10000
-train_df = generate_data(n_samples=n_train)
-n_cf = 10000
-cf_df = generate_data(n_samples=n_cf)
-
-output_dir = Path('/Users/chen/Study/CI/NMMR_q/data/SGD')
-output_dir.mkdir(parents=True, exist_ok=True)
-sgd_train = output_dir / 'sgd_train.csv'
-sgd_cf = output_dir / 'sgd_cf.csv'
-
-train_df.to_csv(sgd_train, index=False)
-cf_df.to_csv(sgd_cf, index=False)
- """
 
 
 

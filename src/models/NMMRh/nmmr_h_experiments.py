@@ -497,7 +497,7 @@ def NMMR_H_experiment(dataset_name: str,
                 "POR": POR
             })
             print(f"\n--- SGD ATE 估计结果 (平均 over {n_trials} 次试验):")
-            print(f"PIPW = {results['PIPW'].mean():.4f}")
+            print(f"POR = {results['POR'].mean():.4f}")
             print("----------------------------------")
             
             output_path = data_configs.get('output_path', 'predicts/sgd/nmmr_q')
@@ -537,35 +537,35 @@ def NMMR_H_experiment(dataset_name: str,
 
             base_dataset = SGDDataset(train_path, device=device)
             cf_dataset = SGDDataset(cf_path, device=device)
-        if search_space:
-            print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
-            final_train_params = _run_optuna_tuning(
-                data_name = dataset_key,
-                dataset=base_dataset,
+            if search_space:
+                print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
+                final_train_params = _run_optuna_tuning(
+                    data_name = dataset_key,
+                    dataset=base_dataset,
+                    n_splits=n_splits,
+                    n_trials=hpo_n_trials,
+                    base_train_params=base_params,
+                    search_space=search_space,
+                    data_configs=data_configs,
+                    random_seed=random_seed,
+                )
+            else:
+                print("\n===> 使用固定默认参数")
+                final_train_params = base_params
+            
+            final_train_params['n_epochs'] += 200
+
+            print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
+            ate_estimate, ate_values, _ = _run_cross_fitting(
+                data_name=dataset_key,
+                dataset=cf_dataset,
                 n_splits=n_splits,
-                n_trials=hpo_n_trials,
-                base_train_params=base_params,
-                search_space=search_space,
+                train_params=final_train_params,
                 data_configs=data_configs,
                 random_seed=random_seed,
+                log_folder=log_folder,
+                tag="sgd_test",
             )
-        else:
-            print("\n===> 使用固定默认参数")
-            final_train_params = base_params
-            
-        final_train_params['n_epochs'] += 200
-
-        print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
-        ate_estimate, ate_values, _ = _run_cross_fitting(
-            data_name=dataset_key,
-            dataset=cf_dataset,
-            n_splits=n_splits,
-            train_params=final_train_params,
-            data_configs=data_configs,
-            random_seed=random_seed,
-            log_folder=log_folder,
-            tag="sgd_test",
-        )
 
     elif dataset_key == 'rhc':
         rhc_data_dir = data_configs.get('data_path')

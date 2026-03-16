@@ -260,7 +260,9 @@ def _run_optuna_tuning(
                 del train_loader, val_loader
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-
+                    
+        avg_val_loss = np.mean(fold_val_losses)
+        return avg_val_loss
 
 
     print(
@@ -523,7 +525,7 @@ def NMMR_Q_experiment(dataset_name: str,
                 "PIPW": PIPW
             })
             print(f"\n--- SGD ATE 估计结果 (平均 over {n_trials} 次试验):")
-            print(f"PIPW = {results['POR'].mean():.4f}")
+            print(f"PIPW = {results['PIPW'].mean():.4f}")
             print("----------------------------------")
             
             output_path = data_configs.get('output_path', 'predicts/sgd/nmmr')

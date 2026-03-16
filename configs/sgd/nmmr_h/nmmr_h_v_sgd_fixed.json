@@ -1,0 +1,28 @@
+{
+  "data_configs": {
+    "sgd": {
+      "data_path": "./data/SGD",
+      "n_samples": 5000,
+      "scenario": 1,
+      "n_trials":20
+    }
+  },
+  "train_params": {
+    "model_name": "nmmr_h",
+    "loss_name": "V_statistic",
+    "n_epochs": 150,
+    "batch_size": 500,
+    "patience": 30,
+    "scheduler_patience": 15,
+    "scheduler_factor": 0.5,
+    "n_splits": 5,
+    "log_metrics": "True",
+    "network_depth": 4,
+    "use_u_statistic": false,
+    "kernel_gamma": 1.0,
+    "hpo_n_trials":15,
+    "learning_rate":0.0012879139533629972,
+    "network_width": 55,
+    "l2_penalty": 1.8615523437173968e-06
+  }
+}

@@ -21,7 +21,7 @@ class MLP_for_NMMR(nn.Module):
 
     def forward(self, x):
         for ix, layer in enumerate(self.layer_list):
-            if ix == (self.network_depth + 1):  # if last layer, don't apply relu activation
+            if ix == (self.network_depth):  # if last layer, don't apply relu activation
                 x = layer(x)
             else:
                 x = torch.relu(layer(x))
