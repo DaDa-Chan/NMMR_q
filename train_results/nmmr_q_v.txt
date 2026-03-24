@@ -1,0 +1,324 @@
+configs/sgd/nmmr_q/nmmr_q_v_sgd_fixed.json
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.9981
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.5876
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.5111
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.5802
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.7360
+[CF-sgd_cf] 平均 ATE(PIPW): 2.282576
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.2326
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4542
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.8852
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.2903
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.1794
+[CF-sgd_cf] 平均 ATE(PIPW): 2.208354
+
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.3677
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.0628
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.4712
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.5294
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.9514
+[CF-sgd_cf] 平均 ATE(PIPW): 2.076499
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.7238
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4644
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.9694
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.9330
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.5542
+[CF-sgd_cf] 平均 ATE(PIPW): 2.128995
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.0045
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.6508
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.4913
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 3.2891
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.1813
+[CF-sgd_cf] 平均 ATE(PIPW): 2.123403
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.7044
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.5513
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 3.2183
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.8138
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.2537
+[CF-sgd_cf] 平均 ATE(PIPW): 2.308294
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.6296
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4789
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.2363
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.6693
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.5341
+[CF-sgd_cf] 平均 ATE(PIPW): 2.109622
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.6457
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.7961
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.6166
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.6492
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.9343
+[CF-sgd_cf] 平均 ATE(PIPW): 2.128385
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.4189
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4603
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 3.2523
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.0818
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.8517
+[CF-sgd_cf] 平均 ATE(PIPW): 2.212996
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.3408
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.6681
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.7713
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.2733
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.9225
+[CF-sgd_cf] 平均 ATE(PIPW): 1.995215
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.9985
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.6953
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.2068
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.2119
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 3.2560
+[CF-sgd_cf] 平均 ATE(PIPW): 2.073694
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.7347
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.6043
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.3463
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.7482
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.2217
+[CF-sgd_cf] 平均 ATE(PIPW): 1.931033
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.2438
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 3.0042
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.8276
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.4639
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.6003
+[CF-sgd_cf] 平均 ATE(PIPW): 2.027967
+
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.6281
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.3663
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 1.6357
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.0728
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.4162
+[CF-sgd_cf] 平均 ATE(PIPW): 2.223808
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.4421
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4697
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.1900
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.8954
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.9713
+[CF-sgd_cf] 平均 ATE(PIPW): 2.193684
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.6534
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.7336
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.4279
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.0879
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 3.1137
+[CF-sgd_cf] 平均 ATE(PIPW): 2.403275
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 1.9979
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 1.6643
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.4554
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 1.7378
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.2735
+[CF-sgd_cf] 平均 ATE(PIPW): 2.025752
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.2208
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 3.0119
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.3933
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.7549
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 1.5834
+[CF-sgd_cf] 平均 ATE(PIPW): 2.392874
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.2520
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.1087
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.2163
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.3800
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.0192
+[CF-sgd_cf] 平均 ATE(PIPW): 2.195250
+
+
+[CF-sgd_cf] Fold 1/5
+  Fold 1 ATE: 2.2377
+
+[CF-sgd_cf] Fold 2/5
+  Fold 2 ATE: 2.4452
+
+[CF-sgd_cf] Fold 3/5
+  Fold 3 ATE: 2.0104
+
+[CF-sgd_cf] Fold 4/5
+  Fold 4 ATE: 2.0735
+
+[CF-sgd_cf] Fold 5/5
+  Fold 5 ATE: 2.1676
+[CF-sgd_cf] 平均 ATE(PIPW): 2.186852
