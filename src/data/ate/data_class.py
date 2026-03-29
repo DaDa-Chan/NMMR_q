@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
@@ -117,6 +118,39 @@ class SGDDataset(Dataset):
             'U': self.U[idx],
             'Y': self.Y[idx],
         }
+
+class BootstrapDataset(Dataset):
+    """
+    从已有 Dataset（需具有 A, W, Z, X, Y 属性）中有放回地抽样，
+    生成与原始数据同接口的 bootstrap 样本。用于构造统计置信区间。
+    """
+    def __init__(self, source_dataset: Dataset, seed: int):
+        n = len(source_dataset)
+        rng = np.random.RandomState(seed)
+        indices = torch.as_tensor(rng.choice(n, size=n, replace=True), dtype=torch.long)
+
+        self.A = source_dataset.A[indices]
+        self.W = source_dataset.W[indices]
+        self.Z = source_dataset.Z[indices]
+        self.X = source_dataset.X[indices]
+        self.Y = source_dataset.Y[indices]
+        self.U = source_dataset.U[indices] if hasattr(source_dataset, 'U') and source_dataset.U is not None else None
+
+    def __len__(self):
+        return self.A.shape[0]
+
+    def __getitem__(self, idx):
+        item = {
+            'A': self.A[idx],
+            'W': self.W[idx],
+            'Z': self.Z[idx],
+            'X': self.X[idx],
+            'Y': self.Y[idx],
+        }
+        if self.U is not None:
+            item['U'] = self.U[idx]
+        return item
+
 
 class MergedDataset(Dataset):
     """

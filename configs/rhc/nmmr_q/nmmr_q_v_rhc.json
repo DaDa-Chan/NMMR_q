@@ -1,7 +1,7 @@
 {
   "data_configs": {
     "rhc": {
-      "data_path": "/home/chz/NMMR_q/data/right_heart_catheterization",
+      "data_path": "./data/right_heart_catheterization",
       "use_all_X": true
     }
   },

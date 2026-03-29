@@ -580,6 +580,7 @@ def NMMR_H_experiment(dataset_name: str,
         if search_space:
             print("\n===> [RHC] 开始训练集 K-fold HPO")
             final_train_params = _run_optuna_tuning(
+                data_name=dataset_key,
                 dataset=train_dataset,
                 n_splits=n_splits,
                 n_trials=hpo_n_trials,
@@ -599,7 +600,7 @@ def NMMR_H_experiment(dataset_name: str,
         full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
         print(f"     全量数据样本数: {len(full_dataset)}")
 
-        ate_estimate, ate_values = _run_cross_fitting(
+        ate_estimate, ate_values, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=full_dataset,
             n_splits=n_splits,
