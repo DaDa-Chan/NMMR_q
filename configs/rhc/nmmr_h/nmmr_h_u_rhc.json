@@ -8,32 +8,32 @@
   "train_params": {
     "model_name": "nmmr_h",
     "loss_name": "U_statistic",
-    "n_epochs": 100,
-    "batch_size": 200,
-    "patience": 30,
+    "n_epochs": 150,
+    "batch_size": 512,
+    "patience": 20,
     "scheduler_patience": 15,
     "scheduler_factor": 0.5,
-    "n_splits": 5,
+    "n_splits": 4,
     "log_metrics": "True",
     "network_depth": 4,
     "use_u_statistic": true,
-    "kernel_gamma": 1.0,
-    "hpo_n_trials": 10,
+    "kernel_gamma": 5,
+    "hpo_n_trials": 2,
 
     "learning_rate": {
         "type": "float",
         "low": 1e-4,
-        "high": 1e-2,
+        "high": 1e-3,
         "log": true
     },
     "network_width": {
         "type": "categorical",
-        "choices": [40, 50, 60]
+        "choices": [40, 45, 50]
     },
     "l2_penalty": {
         "type": "float",
-        "low": 1e-8,
-        "high": 3e-8,
+        "low": 1e-6,
+        "high": 1e-4,
         "log": true
     }
   }

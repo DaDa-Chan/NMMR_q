@@ -79,7 +79,7 @@ class NMMR_H_Trainer:
         kernel_inputs = torch.cat((batch_A, batch_Z, batch_X), dim=1)
         N = kernel_inputs.shape[0]
         sigma_data = fit_sigma(kernel_inputs)
-        k_matrix = calculate_kernel_matrix_batched(dataset=kernel_inputs, batch_indices=(0, N), kernel=G_kernel, sigma=sigma_data, gamma=self.kernel_gamma)
+        k_matrix = calculate_kernel_matrix_batched(dataset=kernel_inputs, batch_indices=(0, N), kernel=G_kernel, sigma=sigma_data, gamma=None)
         return k_matrix
     def train(self, train_loader: DataLoader, val_loader: DataLoader, verbose: int=0) -> MLP_for_NMMR:
         train_dataset, train_indices = _resolve_dataset(train_loader.dataset)

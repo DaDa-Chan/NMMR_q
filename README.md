@@ -74,14 +74,14 @@ python src/experiment.py \
   --dataset_name sgd \
   --model_name nmmr_q \
   --config_path configs/sgd/nmmr_q/nmmr_q_v_sgd.json \
-  --dump_folder results
+  --log_folder results
 
 # RHC
 python src/experiment.py \
   --dataset_name rhc \
   --model_name nmmr_q \
   --config_path configs/rhc/nmmr_q/nmmr_q_v_rhc.json \
-  --dump_folder results
+  --log_folder results
 ```
 
 搜索空间配置示例（超参数用 dict 格式声明搜索范围）：
