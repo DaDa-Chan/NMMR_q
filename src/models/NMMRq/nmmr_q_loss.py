@@ -17,7 +17,7 @@ class NMMR_Q_Loss(nn.Module):
         
         N = kernel_matrix.shape[0]
 
-        residuals = torch.full((N, 1), -1.0, device=kernel_matrix.device, dtype=kernel_matrix.dtype)
+        residuals = torch.full((N, 1), -1, device=kernel_matrix.device, dtype=kernel_matrix.dtype)
 
         if mask_sub.sum() > 0:
             residuals[mask_sub] = q_pred_sub - 1.0

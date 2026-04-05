@@ -13,13 +13,13 @@
     "patience": 30,
     "scheduler_patience": 15,
     "scheduler_factor": 0.5,
-    "n_splits": 5,
+    "n_splits": 4,
     "log_metrics": "True",
     "network_depth": 4,
     "use_u_statistic": false,
-    "kernel_gamma": 1.5,
-    "learning_rate": 0.0002506823639825797,
-    "network_width": 45,
-    "l2_penalty": 4.4648873296641914e-05
+    "kernel_gamma": 2.0,
+    "learning_rate": 0.0007105776050127295,
+    "network_width": 40,
+    "l2_penalty": 3.6818381721856468e-06
   }
 }

@@ -10,11 +10,12 @@ import json
 import glob
 
 # ============================================================
-# 在这里修改输入/输出路径 
+# 路径配置（自动定位到项目根目录）
 # ============================================================
-INPUT_DIR = "./tune_results"           # txt 文件所在目录
-OUTPUT_CSV = "./tune_summary.csv"     # 输出 CSV 文件路径
-CONFIG_BASE_DIR = "."                 # config 路径的根目录（configs/ 所在的父目录）
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+INPUT_DIR = os.path.join(PROJECT_ROOT, "tune_results")
+OUTPUT_CSV = os.path.join(PROJECT_ROOT, "summary", "tune_summary.csv")
+CONFIG_BASE_DIR = PROJECT_ROOT
 # ============================================================
 
 HEADER = [
@@ -102,7 +103,7 @@ def parse_txt_file(filepath: str) -> list[dict]:
         json_params = parse_config_json(config_path)
 
         # 按 "平均 ATE" 切割出每个 trial
-        avg_positions = [m.end() for m in re.finditer(r"平均\s*ATE\([^)]+\):\s*[\d.]+", block)]
+        avg_positions = [m.end() for m in re.finditer(r"平均\s*ATE\([^)]+\):\s*-?[\d.]+", block)]
         trials_text = []
         prev = 0
         for pos in avg_positions:
@@ -141,11 +142,11 @@ def parse_txt_file(filepath: str) -> list[dict]:
                 record["l2_penalty"] = l2_m.group(1) if l2_m else ""
 
             # --- Fold ATE ---
-            for m in re.finditer(r"Fold\s+(\d+)\s+ATE:\s*([\d.]+)", trial_text):
+            for m in re.finditer(r"Fold\s+(\d+)\s+ATE:\s*(-?[\d.]+)", trial_text):
                 record[f"fold{int(m.group(1))}"] = float(m.group(2))
 
             # --- 平均 ATE ---
-            avg_m = re.search(r"平均\s*ATE\([^)]+\):\s*([\d.]+)", trial_text)
+            avg_m = re.search(r"平均\s*ATE\([^)]+\):\s*(-?[\d.]+)", trial_text)
             record["ATE"] = float(avg_m.group(1)) if avg_m else ""
 
             all_records.append(record)

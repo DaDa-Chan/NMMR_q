@@ -174,7 +174,7 @@ class NMMR_Q_Trainer:
 
                 with torch.no_grad():
                     kernel_matrix = self._compute_kernel_matrix(batch_W, batch_X)
-
+                
                 # --- DEBUG: 检查核矩阵是否退化（取消注释以启用）---
                 # if epoch == 0:
                 #     k_mean = kernel_matrix.mean().item()
@@ -182,7 +182,6 @@ class NMMR_Q_Trainer:
                 #     k_min = kernel_matrix.min().item()
                 #     diag_mean = kernel_matrix.diagonal().mean().item()
                 #     print(f"  [Kernel] mean={k_mean:.6e}, min={k_min:.6e}, max={k_max:.6e}, diag_mean={diag_mean:.6e}")
-
 
                 mask0 = (batch_A < 0.5).squeeze()
                 if mask0.sum() > 1:
@@ -326,16 +325,16 @@ class NMMR_Q_Trainer:
             q_hat = model(Z_samples, X_samples, A_samples)
 
         signs = torch.where(A_samples > 0.5, torch.ones_like(A_samples), -torch.ones_like(A_samples))
-
+        
         # --- DEBUG: 检查 q 值和 Y 值分布（取消注释以启用）---
-        # mask1 = (A_samples > 0.5).squeeze()
-        # mask0 = ~mask1
+        mask1 = (A_samples > 0.5).squeeze()
+        mask0 = ~mask1
         # print(f"  [Predict] n={A_samples.shape[0]}, n1={mask1.sum().item()}, n0={mask0.sum().item()}")
         # print(f"  [Predict] Y: mean={Y_samples.mean():.4f}, min={Y_samples.min():.4f}, max={Y_samples.max():.4f}")
         # print(f"  [Predict] q(A=1): mean={q_hat[mask1].mean():.4f}, std={q_hat[mask1].std():.4f}, min={q_hat[mask1].min():.4f}, max={q_hat[mask1].max():.4f}")
         # print(f"  [Predict] q(A=0): mean={q_hat[mask0].mean():.4f}, std={q_hat[mask0].std():.4f}, min={q_hat[mask0].min():.4f}, max={q_hat[mask0].max():.4f}")
         # print(f"  [Predict] sign*q*Y: pos_sum={( signs * q_hat * Y_samples)[mask1].sum():.4f}, neg_sum={(signs * q_hat * Y_samples)[mask0].sum():.4f}")
-
+        
         phi_hat = (signs * q_hat * Y_samples).mean()
 
         return phi_hat.cpu()

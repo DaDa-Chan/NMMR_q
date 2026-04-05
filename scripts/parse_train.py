@@ -10,11 +10,12 @@ import json
 import glob
 
 # ============================================================
-# 在这里修改输入/输出路径 、
+# 路径配置（自动定位到项目根目录）
 # ============================================================
-INPUT_DIR = "./train_results"          # txt 文件所在目录
-OUTPUT_CSV = "./results_summary.csv"  # 输出 CSV 文件路径
-CONFIG_BASE_DIR = "."                 # config 路径的根目录（configs/ 所在的父目录）
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+INPUT_DIR = os.path.join(PROJECT_ROOT, "train_results")
+OUTPUT_CSV = os.path.join(PROJECT_ROOT, "summary", "results_summary.csv")
+CONFIG_BASE_DIR = PROJECT_ROOT
 # ============================================================
 
 # JSON 中需要跳过的 train_params 字段

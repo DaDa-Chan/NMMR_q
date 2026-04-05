@@ -2,24 +2,24 @@
   "data_configs": {
     "rhc": {
       "data_path": "./data/right_heart_catheterization",
-      "use_all_X": true
+      "use_all_X": false
     }
   },
   "train_params": {
     "model_name": "nmmr_q",
     "loss_name": "V_statistic",
-    "n_epochs": 100,
-    "batch_size": 200,
-    "patience": 25,
-    "scheduler_patience": 5,
-    "scheduler_factor": 0.5,
-    "n_splits": 5,
+    "n_epochs": 150,
+    "batch_size": 500,
+    "patience": 40,
+    "scheduler_patience": 10,
+    "scheduler_factor": 0.75,
+    "n_splits": 4,
     "log_metrics": "True",
     "network_depth": 4,
-    "use_u_statistic": false,
+    "use_u_statistic": true,
     "kernel_gamma": 1.0,
-    "learning_rate": 0.001,
-    "network_width": 50,
-    "l2_penalty": 1e-6
+    "learning_rate": 0.002284355481249153,
+    "network_width": 40,
+    "l2_penalty": 0.0005294516472829599
   }
 }

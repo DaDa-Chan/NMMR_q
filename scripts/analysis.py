@@ -19,27 +19,29 @@ matplotlib.rcParams['figure.dpi'] = 150
 matplotlib.rcParams['savefig.bbox'] = 'tight'
 
 TRUE_ATE = 2.0
-OUTPUT_DIR = '/Users/chen/Study/CI/NMMR_q/figures'
 
 import os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'figures')
+SUMMARY_DIR = os.path.join(PROJECT_ROOT, 'summary')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================
 # 加载数据
 # ============================================================
-tune_df = pd.read_csv('/Users/chen/Study/CI/NMMR_q/summary/nmmr_tune_5000.csv', skipinitialspace=True)
+tune_df = pd.read_csv(os.path.join(SUMMARY_DIR, 'nmmr_tune_5000.csv'), skipinitialspace=True)
 tune_df.columns = tune_df.columns.str.strip()
 
-train_df = pd.read_csv('/Users/chen/Study/CI/NMMR_q/summary/nmmr_train_5000.csv', skipinitialspace=True)
+train_df = pd.read_csv(os.path.join(SUMMARY_DIR, 'nmmr_train_5000.csv'), skipinitialspace=True)
 train_df.columns = train_df.columns.str.strip()
 
-dr_u_df = pd.read_csv('/Users/chen/Study/CI/NMMR_q/summary/dr_u_s1_5000.csv', skipinitialspace=True)
+dr_u_df = pd.read_csv(os.path.join(SUMMARY_DIR, 'dr_u_s1_5000.csv'), skipinitialspace=True)
 dr_u_df.columns = dr_u_df.columns.str.strip()
 
-dr_v_df = pd.read_csv('/Users/chen/Study/CI/NMMR_q/summary/df_v_s1_5000.csv', skipinitialspace=True)
+dr_v_df = pd.read_csv(os.path.join(SUMMARY_DIR, 'df_v_s1_5000.csv'), skipinitialspace=True)
 dr_v_df.columns = dr_v_df.columns.str.strip()
 
-linear_df = pd.read_csv('/Users/chen/Study/CI/NMMR_q/predicts/linear/linear_predict.csv', skipinitialspace=True)
+linear_df = pd.read_csv(os.path.join(PROJECT_ROOT, 'predicts', 'linear', 'linear_predict.csv'), skipinitialspace=True)
 linear_df.columns = linear_df.columns.str.strip()
 
 fold_cols = ['fold1', 'fold2', 'fold3', 'fold4', 'fold5']

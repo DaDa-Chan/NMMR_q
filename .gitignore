@@ -1,4 +1,32 @@
+# R
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+*.egg
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Report & reference papers (not for GitHub)
+report/
+reference_paper/
+
+# TensorBoard
+*/tensorboard_log_*/
+
+# Large result files (keep summary CSVs)
+results/

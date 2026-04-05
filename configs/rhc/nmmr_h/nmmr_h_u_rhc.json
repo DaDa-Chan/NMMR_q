@@ -10,15 +10,15 @@
     "loss_name": "U_statistic",
     "n_epochs": 150,
     "batch_size": 512,
-    "patience": 20,
-    "scheduler_patience": 15,
+    "patience": 30,
+    "scheduler_patience": 100,
     "scheduler_factor": 0.5,
     "n_splits": 4,
     "log_metrics": "True",
     "network_depth": 4,
     "use_u_statistic": true,
-    "kernel_gamma": 5,
-    "hpo_n_trials": 2,
+    "kernel_gamma": 3.4,
+    "hpo_n_trials": 5,
 
     "learning_rate": {
         "type": "float",
@@ -28,7 +28,7 @@
     },
     "network_width": {
         "type": "categorical",
-        "choices": [40, 45, 50]
+        "choices": [30, 35, 40]
     },
     "l2_penalty": {
         "type": "float",

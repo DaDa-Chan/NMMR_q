@@ -17,7 +17,7 @@
     "log_metrics": "True",
     "network_depth": 4,
     "use_u_statistic": false,
-    "kernel_gamma": 1.5,
+    "kernel_gamma": 2,
     "hpo_n_trials": 5,
 
     "learning_rate": {
@@ -28,7 +28,7 @@
     },
     "network_width": {
         "type": "categorical",
-        "choices": [35, 40, 45]
+        "choices": [30, 45, 40]
     },
     "l2_penalty": {
         "type": "float",

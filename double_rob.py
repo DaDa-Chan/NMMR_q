@@ -167,12 +167,26 @@ def _run_sgd_dr(device, base_output_path, stat, n_trials, n_samples, dataset_nam
             print(f"均值 -> PIPW: {df_res['PIPW'].mean():.4f}, POR: {df_res['POR'].mean():.4f}, PDR: {df_res['PDR'].mean():.4f}")
 
 
+def _load_rhc_full_dataset(data_cfg, device):
+    """根据单个 config 的 use_all_X 加载 RHC 全量数据"""
+    rhc_data_dir = data_cfg.get('data_path', './data/right_heart_catheterization')
+    use_all_x = data_cfg.get('use_all_X', False)
+    train_ds = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+    val_ds = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+    test_ds = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
+    return MergedDataset([train_ds, val_ds, test_ds])
+
+
 def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode='repeated'):
     """
     RHC 双重稳健实验，支持两种模式：
     - repeated: 在同一数据上用不同随机种子做 repeated cross-fitting，消除拆分噪声
     - bootstrap: 每次 trial 从全量数据有放回抽样，在 bootstrap 样本上 cross-fitting，
                  用于构造考虑数据采样不确定性的统计置信区间
+
+    Q 和 H 分别根据各自 config 中的 use_all_X 加载数据集：
+    - U-statistic: use_all_X=True  (49 features)
+    - V-statistic: use_all_X=False (22 features)
     """
     for stat_type in stat:
         q_config_path = _get_config_path(project_root, dataset_name, "q", stat_type)
@@ -183,15 +197,24 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
         print(f"Loading H Config: {h_config_path.name}")
         data_cfg_h, train_params_h = load_config_content(h_config_path, dataset_name)
 
-        # 加载 RHC 全量数据（只需加载一次）
-        rhc_data_dir = data_cfg_q.get('data_path', './data/right_heart_catheterization')
-        use_all_x = data_cfg_q.get('use_all_X', False)
-        print(f"\n加载 RHC 数据集 (use_all_X={use_all_x})...")
-        train_ds = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        val_ds = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        test_ds = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        full_dataset = MergedDataset([train_ds, val_ds, test_ds])
-        print(f"全量数据样本数: {len(full_dataset)}")
+        # 分别从 Q 和 H 的 config 中读取 use_all_X
+        use_all_x_q = data_cfg_q.get('use_all_X', False)
+        use_all_x_h = data_cfg_h.get('use_all_X', False)
+
+        # Q 和 H 的 use_all_X 相同时共用一份数据，不同时分别加载
+        print(f"\n加载 RHC 数据集: Q(use_all_X={use_all_x_q}), H(use_all_X={use_all_x_h})")
+        full_dataset_q = _load_rhc_full_dataset(data_cfg_q, device)
+        if use_all_x_q == use_all_x_h:
+            full_dataset_h = full_dataset_q
+        else:
+            full_dataset_h = _load_rhc_full_dataset(data_cfg_h, device)
+        print(f"Q 数据样本数: {len(full_dataset_q)}, X维度: {full_dataset_q.X.shape[1]}")
+        print(f"H 数据样本数: {len(full_dataset_h)}, X维度: {full_dataset_h.X.shape[1]}")
+
+        # 从 config 读取各自的 cross-fitting 折数
+        n_splits_q = int(train_params_q.get('n_splits', 5))
+        n_splits_h = int(train_params_h.get('n_splits', 5))
+        print(f"Cross-fitting 折数: Q={n_splits_q}, H={n_splits_h}")
 
         print(f"\n{'='*60}")
         print(f"Running RHC DR ({stat_type}-statistic, mode={rhc_mode})")
@@ -204,17 +227,38 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
 
             if rhc_mode == 'bootstrap':
                 # 每次 trial 有放回抽样，产生新的 bootstrap 数据集
-                dataset = BootstrapDataset(full_dataset, seed=seed)
+                dataset_q = BootstrapDataset(full_dataset_q, seed=seed)
+                dataset_h = BootstrapDataset(full_dataset_h, seed=seed) if full_dataset_h is not full_dataset_q else dataset_q
             else:
                 # repeated 模式：数据不变，仅通过 seed 改变 cross-fitting 折划分
-                dataset = full_dataset
+                dataset_q = full_dataset_q
+                dataset_h = full_dataset_h
 
-            pipw_val, por_val, pdr_val = _run_single_trial(
-                dataset_name, dataset,
-                data_cfg_q, train_params_q,
-                data_cfg_h, train_params_h,
-                seed
+            # --- Q ---
+            q_res = NMMR_Q_experiment(
+                dataset_name=dataset_name,
+                data_configs=data_cfg_q,
+                train_params=train_params_q,
+                log_folder=None,
+                random_seed=seed,
+                dataset=dataset_q
             )
+            pipw_val = q_res['PIPW']
+            q_preds = q_res['q_preds']
+
+            # --- H ---
+            h_res = NMMR_H_experiment(
+                dataset_name=dataset_name,
+                data_configs=data_cfg_h,
+                train_params=train_params_h,
+                log_folder=None,
+                random_seed=seed,
+                dataset=dataset_h
+            )
+            por_val = h_res['POR']
+
+            # --- PDR: 使用 Q 的数据集（包含 Y, A）和 Q/H 的预测 ---
+            pdr_val = _compute_pdr(dataset_q, q_preds, h_res['h_preds'])
 
             results_list.append({
                 "Trial": i,
