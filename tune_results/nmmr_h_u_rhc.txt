@@ -1,0 +1,269 @@
+configs/rhc/nmmr_h/nmmr_h_u_rhc.json
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 0
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.0004982052895927264, 'network_width': 40, 'l2_penalty': 1.3577809952354988e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: -0.0011
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0001
+[CF-rhc_full] 平均 ATE(POR): -0.000494
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = -0.0005
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 0
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.00012663491538096486, 'network_width': 40, 'l2_penalty': 3.374701861568756e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: 0.0011
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0007
+[CF-rhc_full] 平均 ATE(POR): 0.000884
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0009
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 1
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.0003742647757511687, 'network_width': 30, 'l2_penalty': 2.3411110769691567e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: 0.0022
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0008
+[CF-rhc_full] 平均 ATE(POR): 0.001458
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0015
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 1
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.0009568486581769454, 'network_width': 40, 'l2_penalty': 8.28084828634869e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: -0.0011
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0002
+[CF-rhc_full] 平均 ATE(POR): -0.000462
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = -0.0005
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 3
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.0005890626885312378, 'network_width': 35, 'l2_penalty': 1.1024645247685501e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: -0.0001
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0002
+[CF-rhc_full] 平均 ATE(POR): 0.000049
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0000
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 4
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.0009906729345504671, 'network_width': 30, 'l2_penalty': 9.154091075199817e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: 0.0003
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0014
+[CF-rhc_full] 平均 ATE(POR): 0.000890
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0009
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 1
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.00010704727049050407, 'network_width': 40, 'l2_penalty': 3.986509830784119e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: 0.0011
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0035
+[CF-rhc_full] 平均 ATE(POR): 0.002263
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0023
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 1
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.00020079783719349057, 'network_width': 40, 'l2_penalty': 6.91727055260298e-05}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: 0.0010
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0034
+[CF-rhc_full] 平均 ATE(POR): 0.002230
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = 0.0022
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 4
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.00020609981648286974, 'network_width': 30, 'l2_penalty': 2.867422940931297e-06}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: -0.0008
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: -0.0011
+[CF-rhc_full] 平均 ATE(POR): -0.000943
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = -0.0009
+----------------------------------
+
+所有实验运行完毕。
+
+--- 开始运行 Seed 42---
+加载 RHC 数据集 (use_all_X=True)...
+
+===> [RHC] 开始训练集 K-fold HPO
+[Optuna] 开始 5 次试验的 K-fold (k=2) 调优...
+
+[Optuna] 调优完成。
+  最佳 Trial: 3
+  最佳 h-loss: 0.000000
+  最佳参数: {'learning_rate': 0.00012375089332661965, 'network_width': 30, 'l2_penalty': 6.345096132909944e-05}
+
+===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting
+     全量数据样本数: 5735
+
+[CF-rhc_full] Fold 1/2
+  Fold 1 ATE: -0.0024
+
+[CF-rhc_full] Fold 2/2
+  Fold 2 ATE: 0.0009
+[CF-rhc_full] 平均 ATE(POR): -0.000740
+
+--- 最终 ATE(POR) (Seed 42) ---
+ATE(POR) = -0.0007
+----------------------------------

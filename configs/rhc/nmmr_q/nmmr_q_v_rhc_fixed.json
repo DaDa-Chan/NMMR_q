@@ -9,7 +9,7 @@
     "model_name": "nmmr_q",
     "loss_name": "V_statistic",
     "n_epochs": 150,
-    "batch_size": 500,
+    "batch_size": 512,
     "patience": 40,
     "scheduler_patience": 10,
     "scheduler_factor": 0.75,
