@@ -5,6 +5,7 @@ from pathlib import Path
 
 import time
 from src.data.ate.sgd_pv import generate_data
+from src.utils import make_seed_bundle
 from typing import Dict, Any
 
 class ProximalLinearModel:
@@ -167,15 +168,17 @@ class ProximalLinearModel:
             "q_params": t_hat
         }
 
-def LINEAR_experiment(data_configs: Dict[str, Any]):
+def LINEAR_experiment(data_configs: Dict[str, Any], data_seed: int = 0):
     output_path = data_configs.get('output_path', 'predicts/linear')
     n_samples = data_configs.get('n_samples', 2000)
     n_trials = data_configs.get('n_trials', 1)
+    scenario = data_configs.get('scenario', 1)
     POR = []
     PIPW = []
     PDR = []
-    for _ in range(n_trials):
-        df = generate_data(n_samples=n_samples)
+    for trial_idx in range(n_trials):
+        trial_seeds = make_seed_bundle(data_seed, trial_idx)
+        df = generate_data(n_samples=n_samples, scenario=scenario, seed=trial_seeds.data_seed)
         model = ProximalLinearModel(df)
         est = model.estimate_ate()
         POR.append(est['POR'])

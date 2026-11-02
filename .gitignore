@@ -25,6 +25,15 @@ __pycache__/
 report/
 reference_paper/
 
+# Personal planning notes (not for GitHub)
+plan/
+
+# Claude Code local settings (not for GitHub)
+.claude/
+
+# Local-only acceptance tests (not for GitHub, see local_tests/README.md)
+local_tests/
+
 # TensorBoard
 */tensorboard_log_*/
 

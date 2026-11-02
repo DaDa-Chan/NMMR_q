@@ -16,6 +16,7 @@ from src.data.ate.sgd_pv import generate_data
 from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset, BootstrapDataset
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment
 from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment
+from src.utils import get_device, set_random_seed, make_seed_bundle
 
 def load_config_content(config_path: Path, dataset_name: str):
     """读取 JSON 配置文件内容"""
@@ -60,7 +61,7 @@ def run_double_robust_experiment(dataset_name: str, n_trials: int, n_samples: in
     if dataset_name == 'rhc':
         print(f"RHC 模式: {rhc_mode}")
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = get_device()
     base_output_path = Path("predicts") / dataset_name / "dr_results"
     base_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -92,15 +93,23 @@ def _compute_pdr(dataset, q_preds, h_preds_dict):
     return np.mean(pdr_individual)
 
 
-def _run_single_trial(dataset_name, dataset, data_cfg_q, train_params_q, data_cfg_h, train_params_h, seed):
-    """对一个 dataset 运行一次 Q + H + PDR"""
+def _run_single_trial(dataset_name, dataset, data_cfg_q, train_params_q, data_cfg_h, train_params_h, seeds):
+    """
+    对一个 dataset 运行一次 Q + H + PDR。
+    Q 和 H 共享同一个 split_seed(保证交叉拟合分折一致)，但各自拥有独立派生的
+    init_seed(保证两个网络的初始化互不干扰、互不复用同一段随机数流)。
+    """
+    q_init_seed = make_seed_bundle(seeds.init_seed, 0).init_seed
+    h_init_seed = make_seed_bundle(seeds.init_seed, 1).init_seed
+
     q_res = NMMR_Q_experiment(
         dataset_name=dataset_name,
         data_configs=data_cfg_q,
         train_params=train_params_q,
         log_folder=None,
-        random_seed=seed,
-        dataset=dataset
+        random_seed=seeds.split_seed,
+        dataset=dataset,
+        init_seed=q_init_seed,
     )
     pipw_val = q_res['PIPW']
     q_preds = q_res['q_preds']
@@ -110,8 +119,9 @@ def _run_single_trial(dataset_name, dataset, data_cfg_q, train_params_q, data_cf
         data_configs=data_cfg_h,
         train_params=train_params_h,
         log_folder=None,
-        random_seed=seed,
-        dataset=dataset
+        random_seed=seeds.split_seed,
+        dataset=dataset,
+        init_seed=h_init_seed,
     )
     por_val = h_res['POR']
     pdr_val = _compute_pdr(dataset, q_preds, h_res['h_preds'])
@@ -141,22 +151,28 @@ def _run_sgd_dr(device, base_output_path, stat, n_trials, n_samples, dataset_nam
             results_list = []
 
             for i in range(n_trials):
-                seed = i + 1000
-                df = generate_data(n_samples=n_samples, scenario=scenario)
+                # 种子只依赖 (scenario, i)，与 stat_type('u'/'v') 无关，
+                # 保证同一个 trial i 在 U 和 V 两轮里使用完全相同的数据，
+                # 满足"同一重复内所有方法共用数据"的要求。
+                seeds = make_seed_bundle(1000, scenario, i)
+                df = generate_data(n_samples=n_samples, scenario=scenario, seed=seeds.data_seed)
                 dataset = SGDDataset(csv_path='', df=df, device=device)
 
                 pipw_val, por_val, pdr_val = _run_single_trial(
                     dataset_name, dataset,
                     data_cfg_q, train_params_q,
                     data_cfg_h, train_params_h,
-                    seed
+                    seeds
                 )
 
                 results_list.append({
                     "Trial": i,
                     "PIPW": pipw_val,
                     "POR": por_val,
-                    "PDR": pdr_val
+                    "PDR": pdr_val,
+                    "data_seed": seeds.data_seed,
+                    "split_seed": seeds.split_seed,
+                    "init_seed": seeds.init_seed,
                 })
 
             df_res = pd.DataFrame(results_list)
@@ -223,14 +239,18 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
         results_list = []
 
         for i in range(n_trials):
-            seed = i + 1000
+            # 种子只依赖 i(与 stat_type 无关)，保证同一个 trial i 在 U/V 两轮中
+            # 使用相同的 bootstrap 重抽样/初始化规则。
+            seeds = make_seed_bundle(1000, i)
+            q_init_seed = make_seed_bundle(seeds.init_seed, 0).init_seed
+            h_init_seed = make_seed_bundle(seeds.init_seed, 1).init_seed
 
             if rhc_mode == 'bootstrap':
                 # 每次 trial 有放回抽样，产生新的 bootstrap 数据集
-                dataset_q = BootstrapDataset(full_dataset_q, seed=seed)
-                dataset_h = BootstrapDataset(full_dataset_h, seed=seed) if full_dataset_h is not full_dataset_q else dataset_q
+                dataset_q = BootstrapDataset(full_dataset_q, seed=seeds.bootstrap_seed)
+                dataset_h = BootstrapDataset(full_dataset_h, seed=seeds.bootstrap_seed) if full_dataset_h is not full_dataset_q else dataset_q
             else:
-                # repeated 模式：数据不变，仅通过 seed 改变 cross-fitting 折划分
+                # repeated 模式：数据不变，仅通过 split_seed 改变 cross-fitting 折划分
                 dataset_q = full_dataset_q
                 dataset_h = full_dataset_h
 
@@ -240,8 +260,9 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
                 data_configs=data_cfg_q,
                 train_params=train_params_q,
                 log_folder=None,
-                random_seed=seed,
-                dataset=dataset_q
+                random_seed=seeds.split_seed,
+                dataset=dataset_q,
+                init_seed=q_init_seed,
             )
             pipw_val = q_res['PIPW']
             q_preds = q_res['q_preds']
@@ -252,8 +273,9 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
                 data_configs=data_cfg_h,
                 train_params=train_params_h,
                 log_folder=None,
-                random_seed=seed,
-                dataset=dataset_h
+                random_seed=seeds.split_seed,
+                dataset=dataset_h,
+                init_seed=h_init_seed,
             )
             por_val = h_res['POR']
 
@@ -264,7 +286,10 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
                 "Trial": i,
                 "PIPW": pipw_val,
                 "POR": por_val,
-                "PDR": pdr_val
+                "PDR": pdr_val,
+                "split_seed": seeds.split_seed,
+                "init_seed": seeds.init_seed,
+                "bootstrap_seed": seeds.bootstrap_seed if rhc_mode == 'bootstrap' else None,
             })
 
         df_res = pd.DataFrame(results_list)

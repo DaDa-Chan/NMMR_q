@@ -25,7 +25,7 @@ def generate_data(n_samples=2000, scenario=1, seed=None):
     cov_zwu = np.array([[1, 0.25, 0.5], [0.25, 1, 0.5], [0.5, 0.5, 1]])
 
     # -- Z, W, U --
-    results_zwu = np.random.multivariate_normal([0, 0, 0], cov_zwu, n_samples) + mean_zwu
+    results_zwu = rng.multivariate_normal([0, 0, 0], cov_zwu, n_samples) + mean_zwu
     Z = results_zwu[:, 0]
     W = results_zwu[:, 1]
     U = results_zwu[:, 2]
@@ -39,7 +39,7 @@ def generate_data(n_samples=2000, scenario=1, seed=None):
     E_Y_given_W_U_A_Z_X = 2 + 2 * A + X @ bx + (4 - 2) * E_W_given_U_X + 2 * W
 
     # -- Y --
-    Y = E_Y_given_W_U_A_Z_X + np.random.normal(0, 0.25, n_samples)
+    Y = E_Y_given_W_U_A_Z_X + rng.normal(0, 0.25, n_samples)
     
     if scenario == 1:
         pass

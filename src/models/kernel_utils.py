@@ -6,22 +6,24 @@ def fit_sigma(data: torch.Tensor, scale: float = 1.0) -> float:
     Args:
         data: 用于拟合的数据集 (e.g., 训练数据)
               (形状: [n_samples, n_features])
-        scale: 缩放因子 
+        scale: 缩放因子
 
     Returns:
         计算得到的 sigma。
     """
     # 计算所有样本间的两两欧几里得距离
     #    使用 torch.pdist 获取一个包含 N*(N-1)/2 个距离的向量，
-    dists = torch.pdist(data, p=2.0)
-    
+    #    MPS 后端不支持 pdist(aten::_pdist_forward 未实现)，固定放 CPU 算：
+    #    数据量只有 batch 大小，不是性能瓶颈，不影响主训练循环留在 MPS 上跑。
+    dists = torch.pdist(data.detach().cpu(), p=2.0)
+
     # 找到距离的中位数
     #    + 1e-5 防止中位数为0导致除零错误
     median_dist = torch.median(dists) + 1e-5
 
     # 计算 sigma
     sigma = 2.0 * (median_dist ** 2) * scale
-    
+
     return sigma.item()
 
 def G_kernel(
@@ -43,7 +45,7 @@ def calculate_kernel_matrix(dataset, kernel=G_kernel, **kargs):
     tensor = dataset.permute(1, 0)
     tensor1 = tensor.unsqueeze(dim=2)
     tensor2 = tensor.unsqueeze(dim=1)
-    
+
     return kernel(tensor1, tensor2, **kargs)
 
 def calculate_kernel_matrix_batched(dataset, batch_indices:tuple, kernel=G_kernel, **kwargs):

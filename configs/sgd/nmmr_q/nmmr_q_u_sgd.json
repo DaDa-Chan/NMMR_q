@@ -15,27 +15,30 @@
     "scheduler_patience": 5,
     "scheduler_factor": 0.5,
     "n_splits": 5,
-    "log_metrics": "True",
+    "log_metrics": true,
     "network_depth": 4,
     "use_u_statistic": true,
     "kernel_gamma": 0.6,
-    "hpo_n_trials":15,
-    
+    "hpo_n_trials": 15,
     "learning_rate": {
-        "type":"float",
-        "low":9e-4,
-        "high":5e-3,
-        "log":true
+      "type": "float",
+      "low": 0.0009,
+      "high": 0.005,
+      "log": true
     },
     "network_width": {
-        "type":"categorical",
-        "choices":[45, 50, 55]
+      "type": "categorical",
+      "choices": [
+        45,
+        50,
+        55
+      ]
     },
     "l2_penalty": {
-        "type": "float",
-        "low": 1e-6,
-        "high": 3e-6,
-        "log": true
+      "type": "float",
+      "low": 1e-06,
+      "high": 3e-06,
+      "log": true
     }
   }
 }

@@ -14,7 +14,7 @@
     "scheduler_patience": 15,
     "scheduler_factor": 0.5,
     "n_splits": 4,
-    "log_metrics": "True",
+    "log_metrics": true,
     "network_depth": 4,
     "use_u_statistic": false,
     "kernel_gamma": 2.0,

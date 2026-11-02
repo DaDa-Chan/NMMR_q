@@ -12,7 +12,7 @@
     "batch_size": 512,
     "patience": 30,
     "n_splits": 4,
-    "log_metrics": "True",
+    "log_metrics": true,
     "network_depth": 8,
     "use_u_statistic": true,
     "kernel_gamma": 1.0,

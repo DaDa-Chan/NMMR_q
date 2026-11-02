@@ -1,13 +1,9 @@
 import argparse
 import json
-import os
-import random
 import sys
 from pathlib import Path
 from typing import Dict, Tuple
-import numpy as np
 from datetime import datetime
-import torch
 
 # --- 添加项目根目录到 Python 路径 ---
 current_dir = Path(__file__).parent.resolve()
@@ -19,6 +15,7 @@ if str(project_root) not in sys.path:
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment, train_q_standalone
 from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment, train_h_standalone
 from src.models.LINEAR.linear_model import LINEAR_experiment
+from src.utils import set_random_seed, make_seed_bundle
 
 
 def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
@@ -45,16 +42,6 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
         train_params = config_json['train_params']
     
     return data_configs, train_params
-
-
-def set_random_seed(seed: int):
-    """设置所有库的随机种子"""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
 
 
 def main():
@@ -123,39 +110,47 @@ def main():
 
     # 3. 循环运行多个随机种子
     for i in range(args.n_seeds):
-        random_seed = i+42
-        print(f"\n--- 开始运行 Seed {random_seed}---")
-        
+        run_seed = i + 42
+        seeds = make_seed_bundle(run_seed)
+        print(f"\n--- 开始运行 Seed {run_seed} (data={seeds.data_seed}, split={seeds.split_seed}, "
+              f"init={seeds.init_seed}, tuning={seeds.tuning_seed}) ---")
+
         # 为当前种子创建子文件夹
-        seed_log_folder = experiment_log_folder / str(random_seed)
+        seed_log_folder = experiment_log_folder / str(run_seed)
         seed_log_folder.mkdir(parents=True, exist_ok=True)
-        
-        # 设置随机种子
-        set_random_seed(random_seed)
-        
+
+        # 设置 init_seed 对应的全局随机状态
+        set_random_seed(seeds.init_seed)
+
         if args.mode == 'traditional':
             print("模式: 传统 (加载预训练模型)")
             if args.model_name == 'nmmr_q':
                 train_q_standalone(
-                    data_configs, 
+                    data_configs,
                     train_params,
                     dataset_name=args.dataset_name,
                     scenario=data_configs.get('scenario', 1),
                     save_dir=args.model_dir,
                     log_folder=seed_log_folder,
-                    random_seed=random_seed
+                    random_seed=seeds.split_seed,
+                    data_seed=seeds.data_seed,
+                    init_seed=seeds.init_seed,
+                    tuning_seed=seeds.tuning_seed,
                 )
             elif args.model_name == 'nmmr_h':
                 train_h_standalone(
-                    data_configs, 
+                    data_configs,
                     train_params,
                     dataset_name=args.dataset_name,
                     scenario=data_configs.get('scenario', 1),
                     save_dir=args.model_dir,
                     log_folder=seed_log_folder,
-                    random_seed=random_seed
+                    random_seed=seeds.split_seed,
+                    data_seed=seeds.data_seed,
+                    init_seed=seeds.init_seed,
+                    tuning_seed=seeds.tuning_seed,
                 )
-            
+
         else:
             if args.model_name == 'nmmr_q':
                 NMMR_Q_experiment(
@@ -163,31 +158,30 @@ def main():
                     data_configs=data_configs,
                     train_params=train_params,
                     log_folder=seed_log_folder,
-                    random_seed=random_seed
+                    random_seed=seeds.split_seed,
+                    data_seed=seeds.data_seed,
+                    init_seed=seeds.init_seed,
+                    tuning_seed=seeds.tuning_seed,
                 )
-            elif args.model_name == 'nmmr_h':  
+            elif args.model_name == 'nmmr_h':
                 NMMR_H_experiment(
                     dataset_name=args.dataset_name,
                     data_configs=data_configs,
                     train_params=train_params,
                     log_folder=seed_log_folder,
-                    random_seed=random_seed
+                    random_seed=seeds.split_seed,
+                    data_seed=seeds.data_seed,
+                    init_seed=seeds.init_seed,
+                    tuning_seed=seeds.tuning_seed,
                 )
-            elif args.model_name == 'nmmr_h':  
-                NMMR_H_experiment(
-                    dataset_name=args.dataset_name,
-                    data_configs=data_configs,
-                    train_params=train_params,
-                    log_folder=seed_log_folder,
-                    random_seed=random_seed
-                )
-            elif args.model_name == 'linear':  
+            elif args.model_name == 'linear':
                 LINEAR_experiment(
-                    data_configs=data_configs
-                )       
+                    data_configs=data_configs,
+                    data_seed=seeds.data_seed,
+                )
             else:
                 print(f"Unknown model: {args.model_name}")
-            
+
             print("\n所有实验运行完毕。")
 
 if __name__ == '__main__':

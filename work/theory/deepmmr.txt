@@ -1,0 +1,996 @@
+Statistical Analysis and Data Mining: An ASA Data Science Journal
+
+
+
+
+    RESEARCH ARTICLE
+
+
+
+Neural Estimation of Treatment Bridge Functions for
+Proximal Causal Inference
+Bingxi Zhang1                  | Tao Shen2 | Yifan Cui3
+
+1
+ Center for Data Science & School of Mathematical Sciences, Zhejiang University, Hangzhou, China | 2 Department of Statistics and Data Science, National
+University of Singapore, Singapore, Singapore | 3 Center for Data Science, Zhejiang University, Hangzhou, China
+
+Correspondence: Yifan Cui (cuiyf@zju.edu.cn)
+
+Received: 26 April 2025 | Revised: 12 August 2025 | Accepted: 22 August 2025
+
+Funding: The authors were partially supported by the National Key R&D Program of China (2024YFA1015600) and the National Natural Science Foundation of
+China (12471266 and U23A2064).
+
+Keywords: bridge function | deep learning | neural networks | proximal causal inference | unmeasured confounding
+
+
+
+    ABSTRACT
+    The assumption of no unmeasured confounding is crucial for causal inference but is often unrealistic in observational studies.
+    Recently proposed proximal causal inference offers a promising alternative to estimate the causal effect when informative proxy
+    variables are available. An essential ingredient of proximal causal inference is solving integral equations based on bridge func-
+    tions, such as outcome and treatment bridge functions. Distributional identification through the outcome bridge function often
+    requires pointwise assumptions on the outcome distribution that may be difficult to verify or may fail in practice, prompting
+    researchers to focus on the treatment bridge function, which imposes certain assumptions on the treatment. Various methods
+    have been developed to estimate the treatment bridge function, yet data-adaptive and model-free approaches using deep learn-
+    ing are underexplored. In this work, we introduce DeepMMR, a novel method that leverages deep neural networks to estimate
+    the treatment bridge function by minimizing a loss function derived from maximum moment restrictions. Then we exploit the
+    estimated treatment bridge function to learn causal effects. Moreover, we provide theoretical consistency guarantees regarding
+    our proposed framework. Through extensive simulations and real-world data analysis, we demonstrate that our method performs
+    competitively in various settings.
+
+
+
+1 |         Introduction                                                                                            unmeasured confounders, such as parental smoking and phe-
+                                                                                                                    notypes, could confound the intrauterine effect of maternal
+Identifying causal effects is crucial for developing effective                                                      smoking on offspring outcomes [3–5]. Therefore, it is hoped
+interventions and policies in the social, biological, and medical                                                   that measured covariates can effectively act as proxies for the
+sciences. A commonly made assumption in causal effect esti-                                                         underlying confounding mechanisms, enabling us to recover
+mation is that of no unmeasured confounding, which posits                                                           true causal effects and draw valid conclusions.
+that a sufficiently rich set of covariates has been collected such
+that conditional exchangeability holds [1, 2]. However, this                                                        Negative controls [6–9] utilize a specific set of covariates that
+assumption may be unrealistic in observational studies, as it                                                       share common causes with both the treatment and the outcome
+relies on researchers’ ability to measure covariates relevant to                                                    but exert no direct causal effect on either, aiming to detect con-
+all potential confounding mechanisms accurately. For example,                                                       founding mechanisms and eliminate confounding bias. For a
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+© 2025 Wiley Periodicals LLC.
+
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025; 18:e70045                                                                                                                                    1 of 14
+https://doi.org/10.1002/sam.70045
+recent review of negative control research and its applications,      a pointwise assumption on the outcome bridge function that
+see [10, 11]. Although negative controls have long been utilized      may be difficult to verify or may fail in practice. Consequently,
+in laboratory experiments and epidemiological studies [12–15],        researchers propose a different identification strategy through
+the formal development of methods to debias causal effect esti-       the so-called treatment bridge function. Cui et al. [24] proposed
+mates, known as proximal causal inference [16], has emerged           evaluating causal effects through the treatment bridge function,
+more recently.                                                        which is obtained by solving another Fredholm integral equation.
+                                                                      Various methods have been developed to estimate the treat-
+Proximal causal inference provides a powerful framework for           ment bridge function. Cui et al. [24] proposed a semiparamet-
+estimating causal effects in the presence of unmeasured con-          ric approach that leverages the Generalized Method of Moments
+founders, even though measured covariates may be imperfect            (GMM) to estimate parameters, with the treatment bridge func-
+proxies for the underlying confounding mechanisms. This frame-        tion modeled in a logit form. Kallus et al. [25] introduced a min-
+work requires researchers to classify a subset of measured covari-    imax learning approach that avoids the completeness condition
+ates into three types: (i) variables that are common causes of        and relies solely on the existence of bridge functions. This method
+both the treatment and the outcome; (ii) treatment-inducing con-      accommodates various function classes, including RKHSs and
+founding proxies; and (iii) outcome-inducing confounding prox-        neural networks. Similarly, Ghassami et al. [26] also developed a
+ies. Proxies of type (ii) are potential causes of the treatment,      minimax framework that employs doubly robust moment func-
+while proxies of type (iii) are potential causes of the outcome.      tions to construct estimation equations applicable to a broader
+Both types serve as proxies for the unmeasured common causes          range of function spaces.
+that simultaneously affect the treatment and the outcome. Gen-
+erally speaking, covariates that are associated with unmeasured       Limited research has considered data-adaptive and model-free
+confounders but not causally related to either the treatment or       approaches for estimating the treatment bridge function, leav-
+the outcome can be classified as proxies of type (ii) or (iii).       ing the potential of deep learning underexplored. In this work,
+A key requirement for proximal causal inference is that both          we propose DeepMMR, a novel method that utilizes deep neural
+types of proxies (ii) and (iii) must be sufficiently informative      networks to estimate the treatment bridge function by minimiz-
+about the unobserved confounders. This condition ensures the          ing a loss function based on maximum moment restrictions. Once
+existence of bridge functions, which are essential ingredients of     the estimated treatment bridge function is obtained, the average
+the framework and facilitate causal effect identification without     treatment effect can be calculated. Our approach operates under
+directly capturing unmeasured confounders or estimating their         several sufficient assumptions, and the consistency of our estima-
+distribution.                                                         tor is ensured. Our method achieves competitive performance in
+                                                                      simulations and is applicable to real-world data analysis.
+The concept of identifying causal effects through an outcome
+bridge function was introduced by [8], which is characterized by      The remainder of this paper is structured as follows: Section 2
+a Fredholm integral equation. To estimate the outcome bridge          introduces the framework of proximal causal inference and for-
+function, Tchetgen Tchetgen et al. [16] introduced proximal           mulates the problem of interest. In Section 3, we propose a neural
+g-computation, a generalization of Robins’ g-computation, and         network-based estimator for the treatment bridge function and
+a two-stage least squares estimator that relies on a linear bridge    the causal effect. Consistency regarding the estimator is estab-
+function and completeness assumptions. Mastouri et al. [17]           lished in Section 4. Section 5 evaluates the performance of our
+extended the work and developed a two-stage kernel ridge regres-      method compared to other approaches through extensive simu-
+sion method, which remains applicable when the full sample dis-       lations. We demonstrate the practical applicability of our method
+tribution is unavailable. Further advancing this work, Xu et al.      using the right heart catheterization dataset in Section 6. Finally,
+[18] incorporated neural networks into the two-stage regression       Section 7 concludes the work with a discussion of our findings
+framework, relying on completeness conditions and enabling            and potential directions for future research. Proofs and additional
+deep adaptive feature learning.                                       results are provided in the Appendix. Before proceeding, we sum-
+                                                                      marize the key notations used throughout the paper for clarity.
+Beyond regression-based approaches, another line of research
+formulates estimation as an optimization problem under                Notation. The uppercase letters (e.g., 𝐴), calligraphic letters (e.g.,
+moment restrictions. Muandet et al. [19] introduced the Maxi-         ), and lowercase letters (e.g., 𝑎) represent random variables,
+mum Moment Restriction (MMR) framework, which transforms              measurable spaces, and realizations of random variables, respec-
+conditional moment restrictions into unconditional ones and           tively. The symbols ℙ and 𝔼 denote the probability distribution
+constrains the function space within the unit ball of a reproduc-     and the expectation of a random variable. The indicator function
+ing kernel Hilbert space (RKHS) [20, 21]. Building upon this          is denoted by 𝕀 and 𝑋 ⊥ 𝑌 denotes independence between ran-
+idea, Mastouri et al. [17] proposed the Proxy Maximum Moment          dom {variables
+                                                                               }𝑛     𝑋 and 𝑌 . Hats (e.g., 𝜑̂ ) indicate estimators. Let
+Restriction (PMMR) method for estimating bridge functions, uti-        = 𝑑𝑖 𝑖=1 denote a dataset consisting of 𝑛 independent and
+lizing U-statistics and V-statistics [22] to formulate an empirical   identically distributed samples.
+risk minimization objective. Kompa et al. [23] introduced Neural
+Maximum Moment Restriction (NMMR), which incorporates
+neural networks into this framework, thereby enhancing its            2 |     Problem Formulation
+adaptability to complex data distributions.
+                                                                      Causal inference aims to estimate the effect of a treatment
+However, the above identification strategies for the causal esti-     𝐴 on an outcome 𝑌 , using either observational data or ran-
+mates, which rely on the outcome distribution, often necessitate      domized experiment results. In this work, we focus on the
+
+
+2 of 14                                                                   Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+FIGURE 1      |   A causal directed acyclic graph of proximal causal inference.
+
+
+
+binary treatment setting, where 𝐴 ∈ {0, 1}. A central estimand                    confounding. Under appropriate assumptions, proximal causal
+of interest is the average treatment effect (ATE), defined as 𝜑 =                 inference leverages these conditional distributions—by mod-
+𝔼[𝑌 (1)] − 𝔼[𝑌 (0)], which quantifies the expected difference in                  eling the confounding mechanism through Fredholm integral
+the outcome 𝑌 caused by changing the treatment 𝐴 from 0 to 1 in                   equations of the first kind—to identify the causal effect of 𝐴 on
+the population. In the absence of confounding, the ATE is equal                   𝑌 without observing 𝑈 . To ground this framework in practice,
+to the difference in conditional means 𝔼[𝑌 |𝐴 = 1] − 𝔼[𝑌 |𝐴 = 0].                 we next present a real-world example that involves proxies and
+However, it generally does not hold in observational studies due                  illustrates how the proximal causal inference framework can be
+to confounding.                                                                   applied, followed by a discussion of the key assumptions required
+                                                                                  for identification.
+To control for confounding, investigators typically measure a set
+of covariates 𝐿 and incorporate them into the analysis as adjust-                 An illustrative application of proximal causal inference arises in
+ment variables. When these covariates are sufficiently informa-                   evaluating the causal effect of flu shots 𝐴 on influenza hospital-
+tive, the assumption of exchangeability holds, that is, 𝑌 (𝑎)⊥𝐴 | 𝐿               ization 𝑌 among the elderly [6, 10]. In this context, unmeasured
+for 𝑎 = 0, 1. This assumption relies on the investigators’ ability                health-seeking behavior, often difficult to capture, confounds
+to accurately observe all variables that account for potential con-               the causal effect. Nevertheless, there are valid proxies for the
+founding. However, in practice, it is often infeasible to collect a               unmeasured confounders 𝑈 . For instance, the history of annual
+sufficient set of confounders. Instead, observed covariates typi-                 wellness visits, which reflects an individual’s willingness to
+cally act as proxies for the underlying unmeasured confounders.                   engage in healthy behaviors but is not associated with influenza
+Proximal causal inference leverages these covariates as prox-                     hospitalization, can serve as a treatment-inducing confounding
+ies for confounding mechanisms, enabling identification of the                    proxy 𝑍. Similarly, injury/trauma hospitalization, which is asso-
+causal effect in the presence of unmeasured confounding.                          ciated with health-seeking behavior but not influenced by flu
+                                                                                  shots, can serve as an outcome-inducing confounding proxy 𝑊 .
+                                                                                  Lifestyle choices, such as exercising and nutritional habits, can
+2.1 |      Proximal Causal Inference                                              be considered as observed confounders 𝑋. With these proxies,
+                                                                                  we could recover the impact of the unmeasured confounding
+As previously noted, unobserved confounders 𝑈 present a signif-                   and identify the true causal effect. Figure 2 illustrates the above
+icant challenge to the estimation of true causal effects. Proximal                discussion and serves as the real-world counterpart to the general
+causal inference provides an alternative approach by utilizing                    DAG shown in Figure 1. Additional real-world applications can
+observed variables that serve as proxies for latent confounders.                  be found in [9, 27–29].
+In this framework, covariates are classified into three types:
+treatment-inducing confounding proxies 𝑍, outcome-inducing                        To enable valid causal inference in real-world applications like
+confounding proxies 𝑊 , and observed confounders 𝑋 that influ-                    the one described above, the proximal inference framework
+ence both the treatment 𝐴 and the outcome 𝑌 . Specifically, the                   requires certain key assumptions to be satisfied.
+treatment-inducing confounding proxies are potential causes of
+the treatment, and the outcome-inducing confounding proxies                       Assumption 1. (Structural).           1.   Consistency:    𝑌 (𝑎) = 𝑌
+are potential causes of the outcome. Figure 1 illustrates a repre-                almost surely when 𝐴 = 𝑎.
+sentative directed acyclic graph (DAG) that satisfies the identifi-
+cation conditions of proximal causal inference.                                   2. Positivity: 0 < Pr(𝐴 = 𝑎 | 𝑈 , 𝑋) < 1 almost surely, 𝑎 = 0, 1.
+
+It is noted that the observed common causes 𝑋 help reduce resid-                  3. Conditional independence: 𝑌 ⊥ 𝑍 | 𝐴, 𝑈 , 𝑋 and 𝑊 ⊥ (𝐴, 𝑍) |
+ual confounding between 𝐴 and 𝑌 , while the confounding prox-                     𝑈 , 𝑋.
+ies serve to link the unobserved confounder 𝑈 to the treatment 𝐴
+and the outcome 𝑌 , that is, 𝑍 and 𝑊 act as bridges that mediate                  4. Conditional randomization: 𝑌 (𝑎) ⊥ 𝐴 | 𝑈 , 𝑋 for 𝑎 = 0, 1.
+the influence of 𝑈 without requiring direct observation of 𝑈 . The
+observed conditional distributions involving these proxies con-                   Condition (1) guarantees that for individuals receiving treatment
+tain sufficient information to recover the impact of unmeasured                   𝐴 = 𝑎, the observed outcome 𝑌 is the realization of the potential
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                         3 of 14
+FIGURE 2    |   Causal diagram of the effect of flu shots on influenza hospitalization among the elderly under the proximal causal inference framework.
+
+
+
+outcome 𝑌 (𝑎). Condition (2) ensures that, within every stratum              In addition, the treatment bridge function 𝑞 enables the identifi-
+defined by (𝑈 , 𝑋), there is a positive probability of receiving any         cation of quantile treatment effects (QTE). For 𝜏 ∈ (0, 1), the 𝜏-th
+treatment level. Condition (3) clarifies the requirements of prox-           quantile treatment effect [30, 31] is given by
+ies: conditional on (𝐴, 𝑈 , 𝑋), there is no causal effect of 𝑍 on 𝑌 ,
+and conditional on (𝑈 , 𝑋), there is no causal effect of (𝐴, 𝑍) on                                      𝜓(𝜏) = 𝑄1,𝜏 − 𝑄0,𝜏
+𝑊 . Condition (4) requires latent exchangeability. Figure 1 pro-
+vides a graphical representation of Conditions (3) and (4). In addi-         where 𝑄𝑎,𝜏 = inf{𝑦 ∶ Pr[𝑌 (𝑎) ≤ 𝑦] ≥ 𝜏}, 𝑎 = 0, 1. By a simple cal-
+tion to these structural assumptions, a completeness assumption              culation, the 𝜏-th quantile of the potential outcome 𝑄𝑎,𝜏 can be
+is essential for the identification of causal effects.                       identified via the following equation
+                                                                                [(             )]  [                   (        )]
+Assumption 2. (Completeness). For any square integrable                        𝔼 𝕀 𝑌 (𝑎) ≤ 𝑄𝑎,𝜏 = 𝔼 𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍)𝕀 𝑌 ≤ 𝑄𝑎,𝜏 = 𝜏 (2)
+function 𝑔 and for any 𝑎 ∈ , 𝑥 ∈ , 𝔼[𝑔(𝑈 ) | 𝐴 = 𝑎, 𝑊 , 𝑋 =
+𝑥] = 0 almost surely if and only if 𝑔(𝑈 ) = 0 almost surely.                 Another important bridge function used in the literature for
+                                                                             causal identification is the outcome bridge function ℎ, as intro-
+The completeness assumption rules out conditional indepen-                   duced by [8] and discussed in Section 1. However, the identifica-
+dence of 𝑈 and 𝑊 given 𝐴 and 𝑋. It means that proxies 𝑊                      tion of quantile treatment effects requires a pointwise assumption
+have sufficient variability relative to 𝑈 . In the case of categori-         on the outcome bridge function, that is, ℎ is a function of 𝑦. There-
+cal 𝑈 and 𝑊 with a number of categories 𝑑𝑢 and 𝑑𝑤 respectively,              fore, we focus on the treatment bridge function 𝑞 instead. To
+Assumption 2 implies 𝑑𝑤 ≥ 𝑑𝑢 , which means the proxies 𝑊 must                streamline our presentation, we will focus on 𝜑, and the proposed
+have at least as many categories as 𝑈 [16, 24]. We further assume            method can be naturally extended to 𝜓(𝜏).
+the following existence of a treatment bridge function [24].
+                                                                             Accurate estimation of causal effects hinges on first estimating
+Assumption 3. (Treatment bridge function). Suppose there                     the bridge function 𝑞, which satisfies Equation (1), a Fredholm
+exists a treatment bridge function 𝑞(𝑎, 𝑥, 𝑧) that solves the follow-        integral equation of the first kind [32] known to be an ill-posed
+ing integral equation:                                                       inverse problem. The closed-form solution of the equation is not
+                                                                             always available, and solving it can be computationally intensive
+                                           1                                 and numerically unstable. Even a small amount of uncertainty in
+ 𝔼[𝑞(𝐴, 𝑋, 𝑍) | 𝐴 = 𝑎, 𝑊 , 𝑋] =                       ,   𝑎 = 0, 1 (1)
+                                    𝑓 (𝐴 = 𝑎 | 𝑊 , 𝑋)                        the input may lead to excessive variability in the solution. Taking
+                                                                             these into consideration, we introduce an estimation framework
+where 𝑓 denotes the conditional density.                                     for the bridge function that ensures stable and reliable results. In
+                                                                             Section 2.2, we introduce the target risk function that underpins
+The treatment bridge function 𝑞 defined in Equation (1) is par-              our approach. In Section 3, we develop a neural network-based
+ticularly motivated by its role in identifying causal effects. In            method that leverages implicit regularization. The resulting
+scenarios without unmeasured confounding, causal effects are                 bridge function estimates are then used to approximate the
+identified through inverse weighting by the propensity score                 causal effect.
+𝑓 (𝐴|𝑋). However, when unmeasured confounders are present,
+the conditional density 𝑓 (𝐴|𝑈 , 𝑋) becomes non-identifiable
+directly from data. Following [24] with Assumptions 1–3, the                 2.2 | Maximum Moment Restriction
+identity 𝔼[𝑞(𝐴, 𝑋, 𝑍) | 𝐴 = 𝑎, 𝑈 , 𝑋] = 1∕𝑓 (𝐴 = 𝑎 | 𝑈 , 𝑋) holds,
+which makes the function 𝑞 a valid tool for identifying causal               Equation (1) can be rewritten as
+quantities even in the presence of unmeasured confounding.
+Once the treatment bridge function 𝑞 is obtained, the ATE can                          𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1 | 𝑊 , 𝑋] = 0,         𝑎 = 0, 1       (3)
+be identified via the following equation:
+
+                         [                    ]                              which serves as a conditional moment restriction (CMR). Then
+                    𝜑 = 𝔼 (−1)1−𝐴 𝑞(𝐴, 𝑋, 𝑍)𝑌                                we transform the above CMR into a continuum of unconditional
+
+
+4 of 14                                                                           Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+moment restrictions (UMRs) [19], that is,                                                Lemma 1 builds upon the insights from Lemma 1 in [33] and
+                                                                                         Lemma 2 in [17]. Specifically, it drops the sup operator in
+       𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑝(𝑊 , 𝑋)] = 0,        ∀𝑝 ∈        𝑎 = 0, 1       (4)
+                                                                                         Equation (6) and makes the risk 𝑅𝑎𝑘 (𝑞) depend on the choice of the
+                                                                                         kernel 𝑘. The preceding discussion draws a rough link to connect
+where  denotes the set of all measurable functions from  ×
+                                                                                         Equation (3) with 𝑅𝑎𝑘 (𝑞). Hereafter, we present a formal theorem
+ to ℝ. Although this transformation captures all information
+                                                                                         for linkage, assuming that the reproducing kernel 𝑘 is integrally
+about the original CMR and can somewhat simplify computa-
+                                                                                         strictly positive definite, as specified in Assumption 6.
+tions, it also introduces an infinite number of UMRs correspond-
+ing to the infinite number of measurable functions in . Since
+                                                                                         Assumption 6. The kernel 𝑘 is continuous, bounded, and
+Equation (4) must hold for all 𝑝 ∈ , it can be reformulated using
+                                                                                         integrally strictly positive definite (ISPD). That is, for any square
+the supremum operator as follows:
+                                                                                                        ) ( ) 𝑔 with 0 <∥ 𝑔∥2 < ∞, the following holds:
+                                                                                                                                 2
+                                                                                         integrable
+                                                                                                 ( function
+  sup(𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑝(𝑊 , 𝑋)])2 = 0,                        𝑎 = 0, 1   (5)   ∬ 𝑔(𝜉)𝑘 𝜉, 𝜉 ′ 𝑔 𝜉 ′ d𝜉d𝜉 ′ > 0, where 𝜉, 𝜉 ′ ∈ (, ).
+   𝑝∈
+
+                                                                                         Theorem 1. Under Assumptions 4 and 6, for any real-valued
+This is the previously introduced Maximum Moment Restriction
+                                                                                         measurable function 𝑞, 𝑅𝑎𝑘 (𝑞) = 0, if and only if 𝔼[𝕀(𝐴 =
+(MMR) method. Although this procedure reduces the dimension-
+                                                                                         𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1|𝑊 , 𝑋] = 0 holds ℙ𝑊 ,𝑋 -almost surely.
+ality of UMRs, the sup operator complicates the optimization of
+Equation (5). To further address this challenge, we next consider
+                                                                                         According to Theorem 1, if we find a treatment bridge function 𝑞
+function spaces with specific structures, focusing on the repro-
+                                                                                         such that 𝑅𝑎𝑘 (𝑞) = 0, we could obtain a solution that ℙ𝑊 ,𝑋 -almost
+ducing kernel Hilbert space defined in Assumption 4.
+                                                                                         surely solves Equation (1). At the same time, Theorem 1 shows
+                                                                                         that although different ISPD kernels may yield distinct rep-
+Assumption 4. Let 𝑘 be a Hilbert space defined on (, )                                resentations and numerical approximations in practice, the
+with inner product ⟨⋅, ⋅⟩ and norm ∥ ⋅ ∥. The space 𝑘 is a repro-
+                                                                                         true underlying bridge function remains unchanged. Hence, any
+ducing kernel Hilbert space (RKHS) equipped with a reproducing
+                                                                                         ISPD kernel can be used without affecting the solution, providing
+kernel 𝑘 ∶ (, ) × (, ) → ℝ, which satisfies the following
+                                                                                         greater flexibility in kernel selection.
+properties: (i) 𝑘((𝑤, 𝑥), (⋅, ⋅)) ∈ 𝑘 , for all (𝑤, 𝑥) ∈ (, ), and (ii)
+(reproducing property) 𝑝(𝑤, 𝑥) = ⟨𝑝, 𝑘((𝑤, 𝑥), (⋅, ⋅))⟩ for all 𝑝 ∈ 𝑘
+                                                                                         To end this part, we now state the main problem, that is,
+and (𝑤, 𝑥) ∈ (, ).
+                                                                                                                        min 𝑅𝑎𝑘 (𝑞)
+Let 𝑝 denote a function in an RKHS 𝑘 equipped with a reproduc-                                                           𝑞
+
+ing kernel 𝑘. Following [19], when the functions are restricted to
+a unit ball in 𝑘 , the treatment bridge function 𝑞 can be estimated                                          { }𝑛𝑘 for {(
+                                                                                         with a properly selected       𝑎 = 0, 1. And we)}will discuss how
+                                                                                                                                            𝑛
+by minimizing the risk function below,                                                   to use dataset  = 𝑑𝑖 𝑖=1 = 𝑎𝑖 , 𝑤𝑖 , 𝑥𝑖 , 𝑦𝑖 , 𝑧𝑖 𝑖=1 to solve this
+                                                                                         in the next section.
+         𝑅𝑎 (𝑞) =      sup        (𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑝(𝑊 , 𝑋)])2 ,
+            𝑘
+                     𝑝∈𝑘 ,∥𝑝∥≤1
+
+           𝑎 = 0, 1                                                                (6)   3 |     Risk Minimization via Neural Networks
+
+And we assume that the minimizer of 𝑅𝑎 (𝑞) satisfies the follow-                        In this section, we start by approximating the risk function via the
+                                       𝑘
+ing assumption.                                                                          empirical risk. We then employ a deep neural network to estimate
+                                                                                         𝑞 by minimizing the risk function. Then, the ATE is estimated
+                                                                                         with the assistance of 𝑞̂. Additionally, we provide a brief complex-
+                                      [  and 𝑞 ] ∈
+Assumption 5. Consider the function space       ∗
+
+arg min𝑞∈ 𝑅𝑎 (𝑞). Then for any 𝑞 ′ ∈  with 𝔼 |𝑞 ′ (𝐴, 𝑋, 𝑍)| <                        ity analysis of the proposed method.
+      [       𝑘(                           )       ]
+∞, 𝔼 𝕀(𝐴 = 𝑎) 𝑞 ′ (𝐴, 𝑋, 𝑍) − 𝑞 ∗ (𝐴, 𝑋, 𝑍) | 𝑊 , 𝑋 = 0 implies
+𝑞′ = 𝑞∗ .
+                                                                                         3.1 |     Empirical Risk Functions
+Assumption 5 ensures the uniqueness of the optimal function
+𝑞 ∗ and provides a sufficient condition for consistency. It is evi-                      Given the data , to approximate 𝑅𝑎𝑘 (𝑞), we use empirical risks in
+dent that restricting the function class to a unit ball in the RKHS,                     the form of U-statistics and V-statistics [22] as shown below,
+instead of considering all measurable functions, significantly                                                              𝑛
+                                                                                                                  1        ∑      (          )(        )
+simplifies the computation. Furthermore, we can leverage the                                       ̂𝑎 (𝑞) =
+                                                                                                   𝑅                                𝕀𝑖 𝑞𝑖 − 1 𝕀𝑗 𝑞𝑗 − 1 𝑘ij       (7)
+                                                                                                    𝑘,𝑈
+reproducing property of the RKHS to reformulate the equation                                                   𝑛(𝑛 − 1) 𝑖,𝑗=1,𝑖≠𝑗
+using the kernel function 𝑘, as demonstrated in Lemma 1.
+                                                                                                                      𝑛
+                                                                                                                    ∑   (        )(        )
+                                                                                                       ̂𝑎 (𝑞) = 1
+                                                                                                       𝑅                  𝕀 𝑞 − 1 𝕀𝑗 𝑞𝑗 − 1 𝑘ij                   (8)
+Lemma 1.          Assume that 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)2 𝑘((𝑊 , 𝑋),
+                                          (                         )
+                                                                                                        𝑘,𝑉
+                                                                                                                𝑛2 𝑖,𝑗=1 𝑖 𝑖
+(𝑊 , 𝑋))] < ∞, and denote by                  𝐴′
+                                      , 𝑊 , 𝑋 , 𝑌 , 𝑍 an indepen-
+                                                   ′   ′   ′    ′
+
+dent copy of the random variables (𝐴, 𝑊 , 𝑋, 𝑌 , 𝑍). Then, we have                                          (       )             (           )
+                                                                                         where        𝕀 ≔ 𝕀 𝑎𝑖 = 𝑎 ,       𝑞𝑖 ≔ 𝑞 𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 ,   and       𝑘ij ≔
+𝑅𝑎 (𝑞) = 𝑅𝑎𝑘 (𝑞) for 𝑎 = 0, 1, where 𝑅𝑎𝑘 (𝑞) is defined as:                              ((        ) (𝑖      ))
+   𝑘                                                                                     𝑘 𝑤𝑖 , 𝑥𝑖 , 𝑤𝑗 , 𝑥𝑗 . Both forms, namely 𝑅          ̂𝑎 (𝑞) and 𝑅 ̂𝑎 (𝑞),
+                                                                                                                                               𝑘,𝑈         𝑘,𝑉
+                                                                                         can be used for a consistent estimation of 𝑞. To tell the difference,
+ 𝑅𝑎𝑘 (𝑞) = 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)
+             ((        ) (            )   ) (        (          ))]                      a U-statistic considers tuples of independent samples, that is,
+           × 𝕀 𝐴′ = 𝑎 𝑞 𝐴′ , 𝑋 ′ , 𝑍 ′ − 1 𝑘 (𝑊 , 𝑋), 𝑊 ′ , 𝑋 ′                          pairs (𝑖, 𝑗) ∈ [𝑛] × [𝑛] with 𝑖 ≠ 𝑗. In contrast, a V-statistic includes
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                                       5 of 14
+FIGURE 3     |   A diagram of the neural network architecture.
+
+
+
+all tuples (𝑖, 𝑗), and for pairs where 𝑖 = 𝑗, 𝑑𝑖 and 𝑑𝑗 are depen-         despite the empirical risk functions, we also integrate a 𝐿2 regu-
+dent. Thus, 𝑅 ̂𝑎 (𝑞) is a minimum-variance unbiased estimator of           larization term into the objective function, penalizing excessively
+                𝑘,𝑈
+  𝑎
+𝑅𝑘 (𝑞), whereas 𝑅  ̂𝑎 (𝑞) is a biased estimator [17, 22]. However, in      complex solutions and thereby enhancing numerical stability.
+                    𝑘,𝑉
+practice, the V-statistic utilizes full samples and may sometimes          Following [23], the resulting optimization problem is defined as:
+yield a better estimator than that of the U-statistic.
+                                                                                          min(𝑰𝒒 − 𝟏)𝑇 𝐾𝑈 (𝑉 ) (𝑰𝒒 − 𝟏) + 𝜆 ∥ 𝑞∥22               (10)
+                                                                                           𝑞
+As we proceed to construct the neural architecture, we also pro-
+vide a representation in vector and matrix forms. Define the               where 𝜆 balances goodness of fit and model complexity. Fur-
+                             (            )𝑇      (               )𝑇       thermore, as illustrated in the architectural design, stochastic
+column vectors 𝑰 ≔ 𝕀1 , 𝕀2 , · · · , 𝕀𝑛 , 𝒒 ≔ 𝑞1 , 𝑞2 , · · · , 𝑞𝑛 , and
+                                [   ] 𝑛       𝑛×𝑛                          optimization and dropout layers are incorporated as additional
+𝟏 ≔ (1, 1, · · · , 1)𝑇 . Let 𝐾 = 𝑘ij 𝑖,𝑗=1 ∈ ℝ be a symmetric kernel
+                            ((    ) (        ))                            regularization techniques, enhancing robustness to noise and
+matrix, where 𝑘ij = 𝑘 𝑤𝑖 , 𝑥𝑖 , 𝑤𝑗 , 𝑥𝑗 is defined by the repro-
+                                                                           improving the stability of the estimator.
+ducing kernel 𝑘. With these notations, Equations (7) and (8) can
+be rewritten as:
+                                                                           To effectively train the neural network and facilitate efficient
+                                                                           optimization, we follow deep learning practices [34–36] when
+                 ̂𝑎
+                 𝑅          (𝑞) = (𝑰𝒒 − 𝟏)𝑇 𝐾𝑈 (𝑉 ) (𝑰𝒒 − 𝟏)        (9)
+                   𝑘,𝑈 (𝑉 )                                                configuring key training parameters such as batch size and opti-
+                                                                           mizer type. Building upon the network architecture described
+where 𝐾𝑈 (𝑉 ) is determined by the kernel matrix 𝐾. Specifically,          above, we conduct hyperparameter tuning by adjusting the
+𝐾𝑈 is derived by removing the diagonal elements of 𝐾 and                   number of hidden layers, the number of neurons per layer, the
+normalizing it with 𝑛(𝑛 − 1), and 𝐾𝑉 = 𝐾∕𝑛2 . Since the choice             learning rate, the dropout rate, and the 𝐿2 weight decay. This
+of kernel does not affect the solution, we adopt the RBF kernel            procedure is implemented using the gp_minimize function
+throughout the remainder of the paper.                                     from the scikit-optimize Python library.
+
+                                                                           Once the estimator 𝑞̂𝑈 (𝑉 ) is obtained by solving (10), the ATE is
+3.2 |     Neural Architecture and Approximation                            finally estimated via
+                                                                                                         𝑛
+To minimize the empirical risk and estimate the treatment                                             1∑                     (            )
+                                                                                         𝜑
+                                                                                         ̂ 𝑈 (𝑉 ) =         (−1)1−𝑎𝑖 𝑞̂𝑈 (𝑉 ) 𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 𝑦𝑖
+bridge function 𝑞(𝐴, 𝑋, 𝑍), we employ a fully connected feedfor-                                      𝑛 𝑖=1
+ward neural network. The architecture maps the input features
+(𝐴, 𝑋, 𝑍) directly to a continuous estimate of 𝑞 through multi-            While the kernel matrix is central to our estimation framework,
+ple hidden layers with ReLU activation functions, allowing the             its computations constitute the primary bottleneck in terms of
+model to capture complex nonlinear relationships in the data.              both time and memory. Specifically, constructing the kernel
+To mitigate overfitting, dropout layers are strategically included,        matrix to capture
+                                                                                           ( pairwise
+                                                                                              )       relationships incurs a time and space
+and the final estimate of 𝑞 is generated by a linear output layer,         complexity of  𝑛2 , where 𝑛 denotes the number of samples. As
+producing continuous-valued predictions. Figure 3 presents a               𝑛 increases, both the computational burden and memory usage
+schematic diagram illustrating our neural network design.                  grow quadratically, making the kernel matrix a key obstacle to
+                                                                           scalability.
+As previously discussed, the ill-posed nature of Fredholm integral
+equations presents significant challenges in stably and reliably           To mitigate this limitation, several optimization strategies can
+estimating the treatment bridge function 𝑞. To overcome these,             be considered. These include low-rank kernel approximations
+
+
+6 of 14                                                                        Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+TABLE 1     |   Parameter settings for different scenarios.
+
+ Scenario                           𝒃1 (𝑿)                                𝒃2 (𝑿)                           𝒃3 (𝑿)                        𝒃𝒂             𝒃𝒘
+                                                                               𝑇
+                                                                                                        ( )       ( )
+ S1                       4 + |𝑋0 − 1| − |𝑋1 + 1|                          𝑋                         sin 𝑋0 − cos 𝑋1                    −1.5               2
+ S2                              4 − 4𝑋0 𝑋1                                𝑋𝑇                                𝑋0                          −3                2
+ S3                             4 − 2𝑋0 + 𝑋1                       (0.25,0.25)𝑇                             𝑋1                           −3                2
+                                   ( )      ( )                                    𝑇
+                                                                                                         ( )      ( )
+ S4                        2 + cos 𝑋0 − sin 𝑋1                     (0.25,0.25)                      3 exp 𝑋1 − exp 𝑋0                    −3                1
+                                  ( )       (  )
+ S5                       4 + exp 𝑋0 − exp 2𝑋1                     (0.25,0.25)𝑇                    2 | 𝑋1 + 1 | − 3|𝑋0 − 1|             −2.5               1
+                                  √       √
+ S6                          4 + 3 𝑋0 − 3 3 𝑋1                             𝑋𝑇                                𝑋12                        −1.5               1
+
+
+and block-wise matrix computations, which aim to reduce the                            TABLE 2    | A list of proximal causal inference methods.
+computational burden while preserving the expressive power
+                                                                                        Method                                     Description
+of kernel-based methods. In our implementation, we adopt a
+mini-batch training scheme to reduce computational load and                             PMMR [17]                          Minimization optimization
+improve efficiency, with further details provided in Appendix E.                                                            with kernel decomposition
+                                                                                        GMM [24]                              Semiparametric model
+4 |     Theoretical Guarantees                                                                                                regression in a logit form
+                                                                                        MinMax [26]                       Minimax optimization with a
+In this section, we provide theoretical guarantees for our method.                                                            closed-form solution
+We first establish the consistency of the estimated treatment                           DeepMMR-U (ours)                       Neural network with a
+bridge functions, followed by the consistency of the estimated                                                                regularized U-Statistic risk
+ATE. The proofs are primarily based on [33], with full details and
+                                                                                        DeepMMR-V (ours)                       Neural network with a
+additional results provided in Appendix A.
+                                                                                                                              regularized V-Statistic risk
+Theorem 2.       (Consistency    of    𝑞̂𝑈 (𝑉 ) ). Let 𝑞∗ ∶  ×
+  ×→ℝ          satisfy    𝔼[𝕀(𝐴 = 𝑎)𝑞 (𝐴, 𝑋, 𝑍) − 1|𝑊 , 𝑋] = 0
+                                        ∗
+                                                                                       on the one outlined in [24, 37]. More details can be found in
+(ℙ𝑊[,𝑋 -almost surely. 2 ] Assume
+                               )     that 𝔼[|𝑞(𝐴, 𝑋, 𝑍)|] < ∞
+                                                                                       Appendix B.
+  𝔼 sup𝑞∈ |𝑞(𝐴, 𝑋, 𝑍)| < ∞ ,  is compact and convex,
+ Assumptions 5 and 6 hold, Λ(𝑞) is a bounded regularizer and
+  𝑃                   𝑃                                                                We design six different scenarios, varying 𝑏1 (𝑋), 𝑏2 (𝑋),
+𝜆 → 0. Then 𝑞̂𝑈 (𝑉 ) → 𝑞 ∗ .                                                           𝑏3 (𝑋), 𝑏𝑎 , and 𝑏𝑤 , with the parameter settings summarized
+                                                                                       in
+                                                                                       {( Table 1. For )}        each scenario, we generate training datasets
+Theorem 2 demonstrates that under several conditions, the esti-                                                   𝑛
+                                                                                           𝑎𝑖 , 𝑤𝑖 , 𝑥𝑖 , 𝑦𝑖 , 𝑧𝑖 𝑖=1 with sample sizes of 𝑛 = 2000 and
+mated treatment bridge functions 𝑞̂𝑈 and 𝑞̂𝑉 consistently con-                         𝑛 = 4000. Additionally, we evaluate the ground truth ATE 𝜑
+verge to the true treatment bridge function 𝑞 ∗ as the sample size                     using datasets generated from the same mechanism, each with a
+increases. Building upon this, we now establish the consistency                        sample size of 106 .
+of the ATE estimators 𝜑̂ 𝑈 and 𝜑
+                               ̂ 𝑉 in Theorem 3.
+
+Theorem 3.         (Consistency of 𝜑
+                                   ̂ 𝑈 (𝑉 ) ). Assume that conditions of               5.2 |     Evaluation
+                                                              𝑃
+Theorem 2 hold and the outcome 𝑌 is bounded, 𝜑
+                                             ̂ 𝑈 (𝑉 ) → 𝜑.
+                                                                                       To evaluate the performance of the models, we compute the ratio
+Remark.      It should be noted that although our theoretical                          of the estimated causal effect 𝜑  ̂ to the true causal effect 𝜑. This
+results establish consistency of the estimated treatment bridge                        metric directly measures how well the estimated effects align
+function 𝑞̂ and the ATE estimator 𝜑    ̂ in large samples, practi-                     with the true causal effects, offering a clear evaluation of the accu-
+cal challenges such as estimator instability persist in finite sam-                    racy of estimation.
+ples. Specifically, regions where the conditional density 𝑓 (𝐴 =
+𝑎|𝑊 , 𝑋) is close to zero lead to large inverse probability weights                    We compare the performance of our proposed methods
+and consequently high estimator variance. In practice, our frame-                      (DeepMMR-U and DeepMMR-V) with other approaches that
+work addresses this issue by incorporating an explicit regulariza-                     estimate causal effects using bridge functions. The methods are
+tion term that penalizes excessively large solutions, along with                       presented in Table 2, and the code can be found at https://github.
+utilizing the neural network’s global approximation capability to                      com/Bingxi-Zhang/DeepMMR.
+achieve smoother estimates.
+
+5 |     Simulation                                                                     5.3 |     Results
+
+5.1 |      Data Generation                                                             All experiments were conducted using Python 3.12.5 and
+                                                                                       PyTorch 2.4.1 + cpu. Hyperparameter tuning details are
+To assess the performance of different methods for estimating                          provided in Appendix C. Each simulation was replicated 100
+causal effects, we utilize a data generation mechanism based                           times. Figures 4 and 5 illustrate the experimental results of
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                              7 of 14
+FIGURE 4 | Experimental results (𝑛 = 2000): The performance of different methods (PMMR, GMM, MinMax, DeepMMR-U, DeepMMR-V) across
+the various data generation scenarios (S1–S6).
+
+
+
+
+FIGURE 5 | Experimental results (𝑛 = 4000): The performance of different methods (PMMR, GMM, MinMax, DeepMMR-U, DeepMMR-V) across
+the various data generation scenarios (S1–S6).
+
+
+various methods across different scenarios. For detailed results,   MinMax, which serves as a reliable estimator. Between our pro-
+including means and standard deviations, see Tables D1 and D2       posed methods, DeepMMR-U occasionally performs better than
+in Appendix D.                                                      DeepMMR-V, benefiting from its use of independent sample
+                                                                    pairs. Although DeepMMR-V introduces bias, it demonstrates
+From these graphs, it is evident that MinMax, DeepMMR-U,            stable performance in certain settings, as seen in scenario S6.
+and DeepMMR-V consistently outperform other methods across
+all scenarios (S1–S6), demonstrating superior adaptability in       When comparing results across datasets of different sizes,
+handling complex data structures. Among these, DeepMMR-U            we observe that increasing the sample size from 2000 to
+and DeepMMR-V achieve superior performance compared to              4000 generally enhances the performance of DeepMMR-U and
+
+
+8 of 14                                                                Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+TABLE 3 | Average treatment effect estimates (standard errors) and        regularization techniques, the method mitigates the ill-posedness
+95% confidence intervals.                                                 inherent in Fredholm integral equations of the first kind and
+                                                                          enhances the stability of estimation in finite samples.
+                         DeepMMR-U                     DeepMMR-V
+    ATE (SEs)            −2.606 (0.292)                −2.171 (0.112)     Despite its practical effectiveness, the proposed method encoun-
+    95% CIs             (−3.177, −2.034)              (−2.391, −1.950)    ters notable computational challenges due to the explicit use
+                                                                          of kernel matrices. Specifically, the computation (of )the kernel
+                                                                          matrix incurs a time and space complexity of  𝑛2 , where 𝑛
+DeepMMR-V. This improvement indicates their ability to effi-              denotes the number of samples. To alleviate this computational
+ciently process larger datasets and demonstrates their suitabil-          burden, we adopt a mini-batch strategy during training, which
+ity for complex, data-intensive tasks. See the performance of             significantly reduces memory usage and improves runtime effi-
+DeepMMR-U and DeepMMR-V in S4 and S6 for illustration.                    ciency. As demonstrated in Table E1 in Appendix E, this approach
+                                                                          yields substantial gains in both computational speed and resource
+                                                                          utilization. To further address this limitation, future work may
+6 |       Real Data Analysis                                              explore scalable kernel approximation techniques—such as ran-
+                                                                          dom Fourier features [41] or Nyström methods [42, 43]—to
+In this section, we illustrate the proposed estimators of the ATE         approximate the kernel matrix and reduce complexity without
+using a data application considered by [16, 24, 37, 38]. Specif-          compromising estimation accuracy.
+ically, we utilize the right heart catheterization (RHC) dataset
+from the Study to Understand Prognoses and Preferences for                Our method employs RKHS as the function class for 𝑝, which
+Outcomes and Risks of Treatments (SUPPORT) to estimate the                facilitates both theoretical analysis and practical implementa-
+causal effect of RHC during the first 24 h of care in the intensive       tion. Nevertheless, alternative function classes such as neural net-
+care unit (ICU) on survival time up to 30 days [39].                      works offer greater flexibility and representational power. How-
+                                                                          ever, adopting such alternatives introduces new challenges, as
+The dataset consists of 5735 individuals, among whom 2184                 the resulting minimax formulation becomes non-convex, which
+received RHC treatment and 3551 were under control. Among                 may require more advanced optimization strategies (e.g., simul-
+these patients, 3817 survived, whereas 1918 died within 30 days.          taneous Adam [44] or optimistic Adam [45]). Addressing these
+The study collected extensive patient information, encoded in             challenges presents an important avenue for future research.
+various covariates. For more details on the covariates, see [40]. In
+our study, the treatment 𝐴 indicates whether a patient received           Another promising extension lies in the development of dou-
+RHC during the first 24 h of care in the ICU, and the outcome             bly/multiply robust deep learning methods for proximal causal
+𝑌 is the number of days between admission and either death                inference. By incorporating both the treatment and outcome
+or censoring at 30 days. Meanwhile, 10 variables assessing the            bridge functions, as demonstrated in [24, 25, 46, 47], one may
+patients’ overall physiological status were measured based on             enhance the robustness and efficiency of causal effect estimation
+blood tests conducted within the first 24 h in the ICU. These vari-       under unmeasured confounding.
+ables, prone to substantial measurement error, offer only a sin-
+gle snapshot of the patient’s underlying physiological state, and
+thus may serve as potential confounding proxies. Following the            Author Contributions
+settings in [16, 24, 37], we choose 𝑍 = (pafi1, paco21) and
+                                                                          Bingxi Zhang: methodology, implementation, visualization, writing.
+𝑊 = (ph1, hema1). And we assign 20 variables to 𝑋, all of which
+                                                                          Tao Shen: methodology, validation, writing. Yifan Cui: methodology,
+show significant associations with both the treatment 𝐴 and the           writing, supervision.
+outcome 𝑌 . Detailed information is provided in Appendix F.
+                                                                          Acknowledgments
+Table 3 presents the point estimates and 95% confidence inter-
+vals for the ATE. Our methods yield causal effect estimates that          The authors were partially supported by the National Key R&D Program
+                                                                          of China (2024YFA1015600) and the National Natural Science Founda-
+are consistent with previous studies employing the bridge func-
+                                                                          tion of China (12471266 and U23A2064).
+tions ℎ or 𝑞 [24, 27]. This indicates that the RHC treatment may
+have a negative impact on the 30-day survival rates of critically ill     Conflicts of Interest
+patients admitted to the ICU.
+                                                                          The authors declare no conflicts of interest.
+
+                                                                          Data Availability Statement
+7     |   Discussion
+                                                                          The data that support the findings of this study are openly available in
+In this paper, we propose a novel deep learning method for                GitHub at https://github.com/Bingxi-Zhang/DeepMMR.
+estimating treatment bridge functions and evaluating causal
+                                                                          References
+effects in the presence of unmeasured confounding. Building
+on the framework of proximal causal inference, our approach               1. S. Greenland and J. M. Robins, “Identifiability, Exchangeability, and
+leverages deep neural networks to solve optimization prob-                Epidemiological Confounding,” International Journal of Epidemiology 15,
+                                                                          no. 3 (1986): 413–419.
+lems derived from moment restrictions, offering a data-adaptive
+and model-free estimation strategy. By incorporating effective            2. M. A. Hernan, Causal Inference: What if (Taylor & Francis, 2024).
+
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                    9 of 14
+3. M.-J. A. Brion, S. D. Leary, G. D. Smith, and A. R. Ness, “Similar Asso-   21. K. Fukumizu, F. R. Bach, and M. I. Jordan, “Dimensionality
+ciations of Parental Prenatal Smoking Suggest Child Blood Pressure Is         Reduction for Supervised Learning With Reproducing Kernel Hilbert
+Not Influenced by Intrauterine Effects,” Hypertension 49, no. 6 (2007):       Spaces,” Journal of Machine Learning Research 5, no. Jan (2004): 73–99.
+1422–1428.                                                                    22. R. J. Serfling, Approximation Theorems of Mathematical Statistics
+4. L. D. Howe, A. Matijasevich, K. Tilling, et al., “Maternal Smoking         (Wiley Series in Probability and Statistics, 1980).
+During Pregnancy and Offspring Trajectories of Height and Adiposity:          23. B. Kompa, D. Bellamy, T. Kolokotrones, et al., “Deep Learning Meth-
+Comparing Maternal and Paternal Associations,” International Journal          ods for Proximal Inference via Maximum Moment Restriction,” Advances
+of Epidemiology 41, no. 3 (2012): 722–732.                                    in Neural Information Processing Systems 35 (2022): 11189–11201.
+5. J. Yerushalmy, “The Relationship of Parents’ Cigarette Smoking to Out-     24. Y. Cui, H. Pu, X. Shi, W. Miao, and E. Tchetgen Tchetgen, “Semi-
+come of Pregnancy—Implications as to the Problem of Inferring Causa-          parametric proximal causal inference,” Journal of the American Statistical
+tion From Observed Associations,” International Journal of Epidemiology       Association 119, no. 546 (2024): 1348–1359.
+43, no. 5 (2014): 1355–1366.
+                                                                              25. N. Kallus, X. Mao, and M. Uehara, “Causal Inference Under Unmea-
+6. M. Lipsitch, E. Tchetgen Tchetgen, and T. Cohen, “Negative Controls:       sured Confounding With Negative Controls: A Minimax Learning
+A Tool for Detecting Confounding and Bias in Observational Studies,”          Approach. arXiv preprint arXiv:2103.14029” (2021).
+Epidemiology 21, no. 3 (2010): 383–388.
+                                                                              26. A. E. Ghassami, A. Ying, I. Shpitser, and E. Tchetgen Tchetgen, “Min-
+7. M. Kuroki and J. Pearl, “Measurement Bias and Effect Restoration in        imax Kernel Machine Learning for a Class of Doubly Robust Functionals
+Causal Inference,” Biometrika 101, no. 2 (2014): 423–437.                     With Application to Proximal Causal Inference,” in International Confer-
+                                                                              ence on Artificial Intelligence and Statistics (PMLR, 2022), 7210–7239.
+8. M. Wang, Z. Geng, and E. J. Tchetgen Tchetgen, “Identifying Causal
+Effects With Proxy Variables of an Unmeasured Confounder,” Biometrika         27. M. Wang, S. Xu, Y. Li, and E. Tchetgen Tchetgen, “A Confound-
+105, no. 4 (2018): 987–993.                                                   ing Bridge Approach for Double Negative Control Inference on Causal
+                                                                              Effects. arXiv preprint arXiv:1808.04945” (2018).
+9. S. Xu, M. Wang, J. C. Nelson, and E. J. Tchetgen Tchetgen, “Multiply
+                                                                              28. S. G. Sullivan, E. J. Tchetgen Tchetgen, and B. J. Cowling, “Theoretical
+Robust Causal Inference With Double-Negative Control Adjustment for
+                                                                              Basis of the Test-Negative Study Design for Assessment of Influenza Vac-
+Categorical Unmeasured Confounding,” Journal of the Royal Statistical
+                                                                              cine Effectiveness,” American Journal of Epidemiology 184, no. 5 (2016):
+Society, Series B: Statistical Methodology 82, no. 2 (2020): 521–540.
+                                                                              345–353.
+10. X. Shi, W. Miao, and E. T. Tchetgen, “A Selective Review of Nega-
+                                                                              29. K. Q. Li, X. Shi, W. Miao, and E. T. Tchetgen, “Double Negative Control
+tive Control Methods in Epidemiology,” Current Epidemiology Reports 7         Inference in Test-Negative Design Studies of Vaccine Effectiveness,” Jour-
+(2020): 190–202.                                                              nal of the American Statistical Association 119, no. 547 (2024): 1859–1870.
+11. Q. Yang, Z. Yang, X. Cai, H. Zhao, J. Jia, and F. Sun, “Advances in       30. V. Chernozhukov and C. Hansen, “An Iv Model of Quantile Treatment
+Methodologies of Negative Controls: A Scoping Review,” Journal of Clin-       Effects,” Econometrica 73, no. 1 (2005): 245–261.
+ical Epidemiology 166 (2024): 111228.
+                                                                              31. S. Firpo, “Efficient Semiparametric Estimation of Quantile Treatment
+12. S. Suissa and P. Ernst, “Bias in Observational Study of the Effective-    Effects,” Econometrica 75, no. 1 (2007): 259–276.
+ness of Nasal Corticosteroids in Asthma,” Journal of Allergy and Clinical
+                                                                              32. R. Kress, V. Maz’ya, and V. Kozlov, Linear Integral Equations, vol. 82
+Immunology 115, no. 4 (2005): 714–719.
+                                                                              (Springer, 1989).
+13. L. A. Jackson, M. L. Jackson, J. C. Nelson, K. M. Neuzil, and N. S.
+                                                                              33. R. Zhang, M. Imaizumi, B. Schölkopf, and K. Muandet, “Maximum
+Weiss, “Evidence of Bias in Estimates of Influenza Vaccine Effective-
+                                                                              Moment Restriction for Instrumental Variable Regression. arXiv preprint
+ness in Seniors,” International Journal of Epidemiology 35, no. 2 (2006):
+                                                                              arXiv:2010.07684, 3(4)” (2020).
+337–344.
+                                                                              34. I. Goodfellow, Y. Bengio, and A. Courville, Deep Learning (MIT Press,
+14. Y.-J. Lu, J. Gross, D. Bogaert, et al., “Interleukin-17a Mediates         2016), http://www.deeplearningbook.org.
+Acquired Immunity to Pneumococcal Colonization,” PLoS Pathogens 4,
+no. 9 (2008): e1000159.                                                       35. D. P. Kingma, “Adam: A Method for Stochastic Optimization. arXiv
+                                                                              preprint arXiv:1412.6980” (2014).
+15. B. M. Zaadstra, A. M. J. Chorus, S. Van Buuren, H. Kalsbeek,
+and J. M. Van Noort, “Selective Association of Multiple Sclerosis With        36. S. Ruder, “An Overview of Gradient Descent Optimization Algo-
+Infectious Mononucleosis,” Multiple Sclerosis Journal 14, no. 3 (2008):       rithms. arXiv preprint arXiv:1609.04747, 1065” (2016).
+307–313.                                                                      37. T. Shen and Y. Cui, “Optimal Treatment Regimes for Proximal Causal
+                                                                              Learning,” Advances in Neural Information Processing Systems 36 (2023):
+16. E. J. Tchetgen Tchetgen, A. Ying, Y. Cui, X. Shi, and W. Miao, “An
+                                                                              47735–47748.
+Introduction to Proximal Causal Inference,” Statistical Science 39, no. 3
+(2024): 375–390.                                                              38. Z. Qi, R. Miao, and X. Zhang, “Proximal Learning for Individualized
+                                                                              Treatment Regimes Under Unmeasured Confounding,” Journal of the
+17. A. Mastouri, Y. Zhu, L. Gultchin, et al., “Proximal Causal Learning
+                                                                              American Statistical Association 119, no. 546 (2024): 915–928.
+With Kernels: Two-Stage Estimation and Moment Restriction,” in Inter-
+national Conference on Machine Learning (PMLR, 2021), 7512–7523.              39. A. F. Connors, T. Speroff, N. V. Dawson, et al., “The Effectiveness of
+                                                                              Right Heart Catheterization in the Initial Care of Critically Ill Patients,”
+18. L. Xu, H. Kanagawa, and A. Gretton, “Deep Proxy Causal Learning           JAMA 276, no. 11 (1996): 889–897.
+and Its Application to Confounded Bandit Policy Evaluation,” Advances
+in Neural Information Processing Systems 34 (2021): 26264–26275.              40. K. Hirano and G. W. Imbens, “Estimation of Causal Effects Using
+                                                                              Propensity Score Weighting: An Application to Data on Right Heart
+19. K. Muandet, W. Jitkrittum, and J. Kübler, “Kernel conditional             Catheterization,” Health Services and Outcomes Research Methodology 2
+moment test via maximum moment restriction,” in Conference on Uncer-          (2001): 259–278.
+tainty in Artificial Intelligence (PMLR, 2020), 41–50.
+                                                                              41. A. Rahimi and B. Recht, “Random Features for Large-Scale Kernel
+20. B. Schölkopf, “Learning With Kernels: Support Vector Machines, Reg-       Machines,” Advances in Neural Information Processing Systems 20 (2007):
+ularization, Optimization, and Beyond” (2002).                                1177–1184.
+
+
+10 of 14                                                                          Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+42. C. Williams and M. Seeger, “Using the Nyström Method to Speed Up             Proof of Lemma 1
+Kernel Machines,” Advances in Neural Information Processing Systems 13
+(2000): 682–688.                                                                 Proof. Since 𝑘 is the RKHS, we can rewrite Equation (6) as
+
+43. P. Drineas, M. W. Mahoney, and N. Cristianini, “On the Nyström
+Method for Approximating a Gram Matrix for Improved Kernel-Based                   𝑅𝑎 (𝑞) =         sup        (𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1) ⟨𝑝, 𝑘((𝑊 , 𝑋), (⋅, ⋅))⟩])2
+                                                                                       𝑘
+Learning,” Journal of Machine Learning Research 6, no. 12 (2005):                                 𝑝∈𝑘 ,∥𝑝∥≤1
+
+2153–2175.                                                                                    =      sup        (⟨𝑝, 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]⟩)2
+                                                                                                  𝑝∈𝑘 ,∥𝑝∥≤1
+44. N. Landro, I. Gallo, and R. La Grassa, “Mixing Adam and SGD:
+A Combined Optimization Method. arXiv preprint arXiv:2011.08042”                              =∥ 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]∥2                   (A2)
+(2020).
+45. D. Constantinos, I. Andrew, S. Vasilis, and Z. Haoyang, “Training            In the first equality, we utilize the reproducing property of 𝑘 , and in the
+gANS With Optimism. arXiv preprint arXiv:1711.00141” (2017).                     final equality, we rely on the fact that 𝑘 is a vector space. By assumption,
+                                                                                 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))] is a Bochner integrable [48].
+46. O. Dukes, I. Shpitser, and E. J. Tchetgen Tchetgen, “Proximal Media-         Hence, we can write Equation (A2) as
+tion Analysis,” Biometrika 110, no. 4 (2023): 973–987.
+47. B. Yang, Y. Cui, and B. Sun, “Proximal Inference on Population Inter-
+vention Indirect Effect. arXiv preprint arXiv:2504.11848” (2025).                          ∥ 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]∥2
+
+48. I. Steinwart, Support Vector Machines (Springer, 2008).                                  = ⟨𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))],
+
+49. W. K. Newey and D. McFadden, “Large Sample Estimation and                                  𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]⟩
+                                                                                                [
+Hypothesis Testing,” in Handbook of Econometrics, vol. 4 (Elsevier, 1994),                   = 𝔼 ⟨(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅)),
+2111–2245.                                                                                                                                    ]
+                                                                                               𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]⟩
+50. W. Hoeffding, “Probability Inequalities for Sums of Bounded Ran-                            [
+dom Variables,” Journal of the American Statistical Association 58, no. 301                  = 𝔼 ⟨(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅)),
+(1963): 13–30.                                                                                 (( ′     ) (             )   ) ((         )        )⟩]
+                                                                                                𝕀 𝐴 = 𝑎 𝑞 𝐴′ , 𝑋 ′ , 𝑍 ′ − 1 𝑘 𝑊 ′ , 𝑋 ′ , (⋅, ⋅)
+                                                                                                [                          ((      ) (                ) )
+                                                                                             = 𝔼 (𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1) 𝕀 𝐴′ = 𝑎 𝑞 𝐴′ , 𝑋 ′ , 𝑍 ′ − 1
+Appendix A                                                                                      (        (          ))]
+                                                                                               𝑘 (𝑊 , 𝑋), 𝑊 ′ , 𝑋 ′
+Proofs
+                                                                                                                                                                         ◽
+
+Proof of Equation (2)
+                                                                                 Proof of Theorem 1
+Proof. First, we prove the following equation:
+                                                                                 Proof. First, the law of total expectation implies that
+                  𝔼[𝕀(𝑌 ≤ 𝑦) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥]
+                                                                                  𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅))]
+                     = 𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍)𝕀(𝑌 ≤ 𝑦) | 𝑈 , 𝑋 = 𝑥]          (A1)                [                                                              ]
+                                                                                     = 𝔼(𝑊 ,𝑋) 𝔼(𝐴,𝑍) [(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)𝑘((𝑊 , 𝑋), (⋅, ⋅)) | (𝑊 , 𝑋)]
+We have                                                                                       [                                                            ]
+                                                                                     = 𝔼(𝑊 ,𝑋) 𝔼(𝐴,𝑍) [𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1 | (𝑊 , 𝑋)]𝑘((𝑊 , 𝑋), (⋅, ⋅))
+    𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍)𝕀(𝑌 ≤ 𝑦) | 𝑈 , 𝑋 = 𝑥]
+                                                                                 By Lemma 1, we know that 𝑅𝑎𝑘 (𝑞) =∥ 𝔼[(𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1)
+         = 𝔼[𝕀(𝑌 ≤ 𝑦)𝑞(𝐴, 𝑋, 𝑍) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥]𝑓 (𝐴 = 𝑎 | 𝑈 , 𝑋 = 𝑥)         𝑘((𝑊 , 𝑋), (⋅, ⋅))]∥2 . As a result, if 𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) − 1 | (𝑤, 𝑥)] = 0
+         = 𝔼[𝕀(𝑌 ≤ 𝑦) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥]                                        for ℙ𝑊 ,𝑋 -almost all (𝑤, 𝑥), 𝑅𝑎𝑘 (𝑞) = 0.
+
+           × 𝔼[𝑞(𝐴, 𝑋, 𝑍) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥]𝑓 (𝐴 = 𝑎 | 𝑈 , 𝑋 = 𝑥)               To show the converse, we assume that 𝑅𝑎𝑘 (𝑞) = 0 and rewrite it as
+
+         = 𝔼[𝕀(𝑌 ≤ 𝑦) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥]                                                                                       (      ) ( )
+                                                                                                     𝑅𝑎𝑘 (𝑞) =             𝑔(𝜉)𝑘 𝜉, 𝜉 ′ 𝑔 𝜉 ′ d𝜉d𝜉 ′ = 0
+                                                                                                                  ∬(,)
+We utilize the law of total expectation in the first equality. In the second
+equality, we leverage the conditional independence assumption. Finally,                                     (      )
+                                                                                 where 𝜉 = (𝑤, 𝑥), 𝜉 ′ = 𝑤′ , 𝑥′ and 𝑔(𝜉) = 𝔼(𝐴,𝑍) [𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) −
+in the last equality, we apply the following equation mentioned in [24]:
+                                                                                 1 | (𝑤, 𝑥)]𝑝(𝑤, 𝑥). Since 𝑘 is ISPD by assumption, this implies that 𝑔
+                                                         1                       is a zero function with respect to ℙ𝑊 ,𝑋 , i.e., 𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍) −
+          𝔼[𝑞(𝐴, 𝑋, 𝑍) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥] =                                     1 | (𝑤, 𝑥)] = 0 for ℙ𝑊 ,𝑋 -almost all (𝑤, 𝑥).                         ◽
+                                               𝑓 (𝐴 = 𝑎 | 𝑈 , 𝑋 = 𝑥)
+
+By consistency,                                                                  Uniform Convergence of Risk Functionals
+
+         𝔼[𝕀(𝑌 ≤ 𝑦) | 𝐴 = 𝑎, 𝑈 , 𝑋 = 𝑥] = 𝔼[𝕀(𝑌 (𝑎) ≤ 𝑦) | 𝑈 , 𝑋 = 𝑥]            The results in this subsection are used to prove the consistency of 𝑞̂𝑈
+                                                                                 and 𝑞̂𝑉 .
+Therefore, given that Equation (A1) holds,                                       Lemma 2. (Uniform consistency of             ̂𝑎 (𝑞)). Assume that
+                                                                                                                              𝑅 𝑘,𝑈
+                                                                                 𝔼[|𝑞(𝐴, 𝑋, 𝑍)|] < ∞,  is compact and Assumption 6 holds. Then, the risk
+         𝔼[𝕀(𝑌 (𝑎) ≤ 𝑦)] = 𝔼[𝔼[𝕀(𝑌 (𝑎) ≤ 𝑦) | 𝑋 = 𝑥]]                                                                                          𝑃
+                                                                                                                              ̂𝑎 (𝑞) − 𝑅𝑎 (𝑞)| → 0.
+                                                                                 𝑅𝑎 (𝑞) is continuous about 𝑞 ∈  and sup𝑞∈ |𝑅
+                                                                                  𝑘                                                         𝑘,𝑈           𝑘
+                        = 𝔼[𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍)𝕀(𝑌 ≤ 𝑦) | 𝑋 = 𝑥]]                                                                          (                   )
+                                                                                 Proof. We (take) the  ( ( notation
+                                                                                                                )      𝑡 ≔ (𝑎,)(
+                                                                                                                               𝑥,(𝑦, 𝑧), ) ( 𝑎′ , 𝑥′ , )𝑦′ , 𝑧′ )
+                                                                                                                                                     𝑡′ ≔
+                        = 𝔼[𝕀(𝐴 = 𝑎)𝑞(𝐴, 𝑋, 𝑍)𝕀(𝑌 ≤ 𝑦)]                          and       𝐻 𝑡, 𝑡 = 𝕀 𝑎 = 𝑎0 𝑞(𝑎, 𝑥, 𝑧) − 1 𝕀 𝑎 = 𝑎0 𝑞 𝑎 , 𝑥 , 𝑧 − 1
+                                                                                                   ′                                ′        ′  ′    ′
+                                                                                  (       ( 𝑞 ))
+                                                                                 𝑘 (𝑤, 𝑥), 𝑤′ , 𝑥′   for some 𝑡, 𝑡′ ∈  ×  ×  × . To prove 𝑅      ̂𝑎 (𝑞)
+                                                                                                                                                        𝑘,𝑈
+Setting 𝑦 = 𝑄𝑎,𝜏 completes the proof.                                       ◽    converges uniformly to 𝑅𝑎 (𝑞), we need to show:
+                                                                                                                      𝑘
+
+
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                                         11 of 14
+      ( )
+(a) 𝐻𝑞 𝑡, 𝑡′ is continuous at each 𝑞 with probability one.                                            Hence, our assertion follows from [49] (Lemma 8.5).                                                    ◽
+          ( )        |( (         )              )( (            ) (           )   )
+       |𝐻𝑞 𝑡, 𝑡′ | = | 𝕀 𝑎 = 𝑎0 𝑞(𝑎, 𝑥, 𝑧) − 1 𝕀 𝑎′ = 𝑎0 𝑞 𝑎′ , 𝑥′ , 𝑧′ − 1                           Proof of Theorem 2
+                     |
+                       (        (      ))|
+                     𝑘 (𝑤, 𝑥), 𝑤′ , 𝑥′ |                                                              Proof. From the conditions of Lemmas 2 and 3, we know that  is com-
+                                          |                                                                                                                            𝑃
+                     |(         )               ‖(            ) (            )   |                                                                   ̂𝑎
+                                                                                                      pact, 𝑅𝑎 (𝑞) is continuous about 𝑞 and sup𝑞∈ |𝑅   (𝑞) − 𝑅𝑎 (𝑞)| → 0.
+                   ≤ |𝕀 𝑎 = 𝑎0 𝑞(𝑎, 𝑥, 𝑧) − 1‖𝕀 𝑎′ = 𝑎0 𝑞 𝑎′ , 𝑥′ , 𝑧′ − 1|                                   𝑘                                                                𝑘,𝑈 (𝑉 )         𝑘
+                     |                          ‖                                |                    As  is convex and Assumptions 5 and 6 hold, 𝑅𝑎 (𝑞) is convex on  and
+                    | (         ( ′ ′ ))|                                                                                                                 𝑘
+
+                    |𝑘 (𝑤, 𝑥), 𝑤 , 𝑥 |                                                                is uniquely minimized at 𝑞 ∗ . Based on the conditions that Λ(𝑞) is bounded
+                    |                      |                                                                 𝑃
+                                       ( (             )       )                                      and 𝜆 → 0, we obtain by Slutsky’s theorem that
+                   ≤ (|𝑞(𝑎, 𝑥, 𝑧)| + 1) |𝑞 𝑎′ , 𝑥′ , 𝑧′ | + 1
+                    √                                                                                            | ̂𝑎                             |      | ̂𝑎                   |
+                                                                      ( )                                    sup|𝑅           (𝑞) + 𝜆Λ(𝑞) − 𝑅𝑎 (𝑞)| ≤ sup|𝑅        (𝑞) − 𝑅𝑎 (𝑞)|
+                                                                                                             𝑞∈ |                                | 𝑞∈ | 𝑘,𝑈 (𝑉 )              |
+                        𝑘((𝑤, 𝑥), (𝑤, 𝑥))𝑘((𝑤′ , 𝑥′ ), (𝑤′ , 𝑥′ )) ≡ 𝑑 𝑡, 𝑡′                                        𝑘,𝑈 (𝑉 )                  𝑘                             𝑘
+
+
+                                                                                                                                                                                           𝑃
+The inequality is obtained using the Cauchy-Schwarz inequality and                                                                                                  + 𝜆sup Λ(𝑞) → 0
+                                                                                                                                                                          𝑞∈
+absolute value inequality. Since  is compact, every 𝑞 ∈  has 𝑞(𝑎, 𝑥, 𝑧)
+bounded for ∥ (𝑎, 𝑥, 𝑧) ∥< ∞.( In) terms of 𝑘(⋅, ⋅) (is bounded
+                                                         )       as per                               Consequently, we assert the conclusion by [49] (Theorem 2.1).                                          ◽
+Assumption 6, we have 𝐻𝑞 𝑡, 𝑡′ < ∞ and thus 𝐻𝑞 𝑡, 𝑡′ continuous at
+each 𝑞 with probability one.
+                      ( )         ( )       ( )                                                       Proof of Theorem 3
+(b) There is 𝑑 𝑡, 𝑡′ with |𝐻𝑞 𝑡, 𝑡′ | ≤ 𝑑 𝑡, 𝑡′ for all 𝑞 ∈  and
+       [ (        )]
+𝔼𝑇 ,𝑇 ′ 𝑑 𝑇 , 𝑇 ′    < ∞.                                                                             Proof. The difference between 𝜑
+                                                                                                                                    ̂ 𝑈 (𝑉 ) and 𝜑 can be decomposed as
+               [ (       )]                                                                                                    (  𝑛
+                                                                                                                                                                                                         )
+        𝔼𝑇 ,𝑇 ′ 𝑑 𝑇 , 𝑇 ′ ≤ 𝔼[1 + |𝑞(𝐴, 𝑋, 𝑍)|]2 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥)) < ∞                                                   1∑
+                                                                (𝑤,𝑥)                                       ̂ 𝑈 (𝑉 ) − 𝜑 =
+                                                                                                            𝜑                        (−1) (̂ 1−𝑎𝑖
+                                                                                                                                                     𝑞𝑈 (𝑉 ) (𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 ) − 𝑞 (𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 ))𝑦𝑖
+                                                                                                                                                                                 ∗
+                                                                                                                             𝑛 𝑖=1
+   (             )𝑛,𝑛                                                                                                      ⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟
+(c) 𝑡𝑖 , 𝑡𝑗 𝑖≠𝑗 has strict stationarity and ergodicity in the sense of [49].                                                                                        (I)
+                                                                                                                                   (      𝑛
+                                                                                                                                                                                     )
+Strict stationarity means that the distribution of a set of data
+(          )𝑖+𝑚,𝑗+𝑚′                                                                                                               1∑
+  𝑡𝑖 , 𝑡𝑗≠𝑖 𝑖=1,𝑗=1 does not depend on the starting indices 𝑖, 𝑗 for any 𝑚 and                                                 +           (−1) 𝑞 (𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 )𝑦𝑖 − 𝜑
+                                                                                                                                                    1−𝑎𝑖 ∗
+                                                                                                                                   𝑛 𝑖=1
+                                                                                            𝑃
+𝑚′ , which is easy to check. Ergodicity means that 𝑅̂𝑎 (𝑞) → 𝑅𝑎 (𝑞) for                                                          ⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟
+                 [   (     )]                         𝑘,𝑈       𝑘 (   )                                                                                     (II)
+all 𝑞 ∈  and 𝔼 |𝐻𝑞 𝑇 , 𝑇 ′ | < ∞. We have already shown that 𝐻𝑞 𝑡, 𝑡′
+                    [   (     ) ]                   𝑃
+is bounded and 𝔼 |𝐻𝑞 𝑇 , 𝑇 ′ | < ∞, so 𝑅     ̂𝑎 (𝑞) → 𝑅𝑎 (𝑞) follows by                                                    𝑃
+                                              𝑘,𝑈         𝑘                                          To prove 𝜑
+                                                                                                               ̂ 𝑈 (𝑉 ) → 𝜑, we need to show both terms (I) and (II) converge to
+[50]. Therefore, ergodicity holds, and we have shown all conditions                                   0 in probability.
+required by extended results of [49] (Lemma 2.4). Then, it follows that                                                                                              (            )
+                           𝑃
+         ̂𝑎 (𝑞) − 𝑅𝑎 (𝑞)| → 0 and 𝑅𝑎 (𝑞) is continuous.                                               Term (I): By the consistency of 𝑞̂𝑈 (𝑉 ) , sup|̂        𝑞𝑈 (𝑉 ) 𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 −
+sup𝑞∈ |𝑅 𝑘,𝑈        𝑘              𝑘                               ◽                                                                                                              𝑖
+                                                                [                                        (            ) 𝑃
+Lemma 3. (Uniform consistency of 𝑅      ̂ (𝑞)). Assume that 𝔼 sup𝑞∈
+                                         𝑎                                                            𝑞 ∗ 𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 | → 0. Since 𝑌 and (−1)1−𝑎𝑖 are bounded, this term converges
+                                         𝑘,𝑉
+               ]                                                                                      to 0 in probability.
+|𝑞(𝐴, 𝑋, 𝑍)| < ∞,  is compact and Assumption 6 holds. Then, the risk
+             2
+
+                                                                                                𝑃     Term (II): This term represents the discrepancy between the empirical
+                                              ̂𝑎 (𝑞) − 𝑅𝑎 (𝑞)| → 0.
+𝑅𝑎 (𝑞) is continuous about 𝑞 ∈  and sup𝑞∈ |𝑅                                                       average and the true expectation:
+   𝑘                                            𝑘,𝑉                                    𝑘
+
+Proof. We adopt the same notation as used in the proof of Lemma 2. To                                                 𝑛
+             ̂𝑎 (𝑞) converges uniformly to 𝑅𝑎 (𝑞), we need to show:                                                1∑                (            )      [                       ]
+prove that 𝑅                                                                                                             (−1)1−𝑎𝑖 𝑞 ∗ 𝑎𝑖 , 𝑥𝑖 , 𝑧𝑖 𝑦𝑖 − 𝔼 (−1)1−𝐴 𝑞 ∗ (𝐴, 𝑋, 𝑍)𝑌
+              𝑘,𝑉                            𝑘                                                                    𝑛 𝑖=1
+        ( ′)
+(a) 𝐻𝑞 𝑡, 𝑡 is continuous at each 𝑞 with probability one, as proven in
+Lemma 2.                                                                                              By the law of large numbers, the empirical average converges to its true
+           [                ]             [                ]                                          expectation, implying that this term converges to 0 in probability.    ◽
+                  (       )
+(b) 𝔼𝑇 ,𝑇 ′ sup|𝐻𝑞 𝑇 , 𝑇 ′ | < ∞ and 𝔼𝑇 ,𝑇 sup|𝐻𝑞 (𝑇 , 𝑇 )| < ∞.
+                  𝑞∈                                        𝑞∈
+
+        [                   [  ]                                                                      Appendix B
+              (       )                           ( (               )      )
+𝔼𝑇 ,𝑇 ′ sup|𝐻𝑞 𝑇 , 𝑇 ′ | ≤ 𝔼 sup(|𝑞(𝐴, 𝑋, 𝑍)| + 1) |𝑞 𝐴′ , 𝑋 ′ , 𝑍 ′ | + 1                            Experiment Settings
+            𝑞∈                         𝑞∈
+                                                                                                  ]
+                                                √                                                     Covariates
+                                                                                                        (       ) 𝑋 are generated from a multivariate normal distribution
+                                                  𝑘((𝑊 , 𝑋), (𝑊 , 𝑋))𝑘((𝑊 ′ , 𝑋 ′ ), (𝑊 ′ , 𝑋 ′ ))    𝑁 Γ𝑥 , Σ𝑥 . We then generate 𝐴 conditional on 𝑋 from a Bernoulli
+                                      [                                                   ]           distribution.
+                                                                ( (               )      )
+                                   ≤ 𝔼 sup(|𝑞(𝐴, 𝑋, 𝑍)| + 1) sup |𝑞 𝐴′ , 𝑋 ′ , 𝑍 ′ | + 1              Next we generate 𝑍, 𝑊 , 𝑈 from the following multivariate normal distri-
+                                        𝑞∈                         𝑞∈
+                                                                                                      bution,
+                                                sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥))
+                                                (𝑤,𝑥)                                                                           ⎛⎛ 𝛼0 + 𝛼𝑎 𝐴 + 𝛼𝑥 𝑋 ⎞     ⎛ 𝜎 2 𝜎zw 𝜎zu ⎞⎞
+                                                                                                                                ⎜⎜                  ⎟     ⎜ 𝑧           ⎟⎟
+                                   = 𝔼[sup(|𝑞(𝐴, 𝑋, 𝑍)| + 1)]2 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥))                      (𝑍, 𝑊 , 𝑈 )|𝐴, 𝑋 ∼ MVN⎜⎜𝜇0 + 𝜇𝑎 𝐴 + 𝜇𝑥 𝑋 ⎟, Σ = ⎜𝜎zw 𝜎𝑤2 𝜎wu ⎟⎟
+                                        𝑞∈                             (𝑤,𝑥)
+                                                                                                                                ⎜⎜                  ⎟     ⎜           2 ⎟⎟
+                                                                                                                                ⎝⎝ 𝜅0 + 𝜅𝑎 𝐴 + 𝜅𝑥 𝑋 ⎠     ⎝ 𝜎zu 𝜎wu 𝜎𝑢 ⎠⎠
+                                   = 𝔼[sup|𝑞(𝐴, 𝑋, 𝑍)| + 1]2 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥)) < ∞
+                                        𝑞∈                        (𝑤,𝑥)
+            [          ]   [                      ]                                                   Finally,
+                                                                                                        (      )𝑌 is generated from 𝔼[𝑌 |𝐴, 𝑈 , 𝑊 , 𝑋, 𝑍] plus a normal noise
+ 𝔼𝑇 ,𝑇 sup|𝐻𝑞 (𝑇 , 𝑇 )| ≤ 𝔼 sup(|𝑞(𝐴, 𝑋, 𝑍)| + 1)2 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥))                              𝑁 0, 𝜎𝑦2 with
+                𝑞∈                       𝑞∈                                   (𝑤,𝑥)
+                   [                             ]                                                      𝔼[𝑌 |𝐴, 𝑈 , 𝑊 , 𝑋, 𝑍] = 𝑏0 + 𝑏1 (𝑋)𝐴 + 𝑏2 (𝑋)𝑋
+            = 𝔼 (sup|𝑞(𝐴, 𝑋, 𝑍)| + 1)2 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥))                                                                      (                      )
+                        𝑞∈                          (𝑤,𝑥)                                                                      + 𝑏𝑤 + 𝑏𝑎 𝐴 + 𝑏3 (𝑋)𝐴 − 𝜔 𝔼[𝑊 |𝑈 , 𝑋] + 𝜔W
+               ( [                ]   )
+            ≤ 2 𝔼 sup|𝑞(𝐴, 𝑋, 𝑍)|2 + 1 sup 𝑘((𝑤, 𝑥), (𝑤, 𝑥)) < ∞                                                                      𝜎 (               )
+                         𝑞∈                            (𝑤,𝑥)
+                                                                                                      where 𝔼[𝑊 |𝑈 , 𝑋] = 𝜇0 + 𝜇𝑥 𝑋 + 𝜎wu2 𝑈 − 𝜅0 − 𝜅𝑥 𝑋 .
+                                                                                                                                                         𝑢
+
+
+
+
+12 of 14                                                                                                  Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+The parameters are set as follows:                                                        TABLE D2       | Simulation results (𝑛 = 4000): Means and standard
+                                              (                 )                         deviations.
+                                               0.625       0
+                   Γ𝑥 = (0.25,0.25)𝑇 , Σ𝑥 =                                                      PMMR          GMM            MinMax      DeepMMR-U DeepMMR-V
+                                                   0    0.625
+                                                                                           S1 1.306 (0.088) 0.898 (0.221) 1.042 (0.301)     1.014 (0.154)   1.013 (0.137)
+                            [       {               }]−1                                   S2 1.277 (0.079) 0.923 (0.255) 1.013 (0.293)     1.001 (0.147)   1.047 (0.145)
+               Pr(𝐴 = 1|𝑋) = 1 + exp (0.25,0.25)𝑇 𝑋
+                                                                                           S3 1.278 (0.085) 0.895 (0.242) 1.063 (0.307)     1.010 (0.146)   0.970 (0.138)
+                   𝛼0 = 0.25, 𝛼𝑎 = 0.25, 𝛼𝑥 = (0.25,0.25)𝑇                                 S4 1.292 (0.071) 0.937 (0.214) 1.030 (0.262)     1.007 (0.115)   0.988 (0.127)
+                                                                                           S5 1.260 (0.079) 0.892 (0.257) 1.007 (0.263)     0.977 (0.114)   1.002 (0.124)
+                   𝜇0 = 0.25, 𝜇𝑎 = 0.25, 𝜇𝑥 = (0.25,0.25)𝑇                                 S6 1.267 (0.086) 0.863 (0.215) 0.995 (0.279)     1.004 (0.132)   1.003 (0.128)
+
+                   𝜅0 = 0.25, 𝜅𝑎 = 0.25, 𝜅𝑥 = (0.25,0.25)𝑇
+
+                            ⎛ 1 0.5 0.5⎞
+                            ⎜          ⎟                                                  Appendix E
+                        Σ = ⎜0.5 1 0.5⎟, 𝜎𝑦 = 0.25
+                            ⎜          ⎟                                                  Mini-Batch Training
+                            ⎝0.5 0.5 1 ⎠
+                                                                                          The primary computational bottleneck of our approach arises from con-
+                                𝑏0 = 2, 𝜔 = 1
+                                                                                          structing (the)kernel matrix, which entails both time and space complex-
+                                                                                          ities of  𝑛2 with respect to the sample size 𝑛, thereby limiting its scal-
+The remaining parameters 𝑏1 (𝑋), 𝑏2 (𝑋), 𝑏3 (𝑋), 𝑏𝑎 , and 𝑏𝑤 are described                ability to large datasets. To address this issue, we employ a mini-batch
+in Table 1.                                                                               training scheme aimed at reducing memory consumption, enhancing
+                                                                                          computational efficiency, and stabilizing the training process.
+Appendix C
+                                                                                          Specifically, we apply the mini-batch strategy during the training of the
+Hyperparameter Tuning                                                                     deep neural network 𝑞. A PyTorch DataLoader is used to randomly
+                                                                                          sample mini-batches of size 100 from the training set. At each iteration,
+We performed hyperparameter tuning using the gp_minimize function                         the kernel matrix and loss function are computed based on the current
+from the scikit-optimize Python library. The search space for the                         mini-batch, and the model parameters are updated via stochastic gradient
+hyperparameters of the neural network is summarized in Table C1.                          descent by minimizing this mini-batch approximation of the loss.
+                                                                                          To assess the impact of the mini-batch strategy, we conduct experi-
+TABLE C1 | Hyperparameter search space for simulation and RHC.                            ments comparing model performance with and without mini-batching
+Int denotes integer variables, and Real denotes continuous variables.                     across varying sample sizes. The results, summarized in Table E1,
+              Network Network          Learning                            Dropout        report average running times over 100 runs for six scenarios, along
+               depth   width             rate           𝑳2 penalty          prob          with mean CPU and memory usage recorded during the experiments.
+                                                                                          The findings demonstrate that the mini-batch strategy significantly
+ Simulation Int(3, 6) Int(20, 40)        Real             Real                Real
+                                                                                          enhances training efficiency and scalability, with pronounced benefits for
+                                       (10−5 , 10−2 )   (10−8 , 10−7 )       (0.1, 0.5)
+                                                                                          larger datasets.
+ RHC          Int(4, 9) Int(20, 50)      Real             Real                Real
+                                       (10−5 , 10−2 )   (10−8 , 10−7 )       (0.1, 0.5)
+
+                                                                                          TABLE E1 | Comparison of model performance with and without
+For each experiment, we selected the optimal hyperparameters by min-                      mini-batching across varying sample sizes.
+imizing the value of the regularized loss function. Another important
+hyperparameter is the kernel used in the loss function of DeepMMR. In                                                             Running           CPU         Memory
+all experiments, we employed the RBF kernel.                                               Sample size      Batch strategy       time (min)       usage (%)      (GB)
+
+                    (      )      {                   }                                    𝑛 = 2000         With mini-batch         20.86            8.81         0.35
+                  𝐾 𝑥𝑖 , 𝑥𝑗 = exp −𝛾 −1 ∥ 𝑥𝑖 − 𝑥𝑗 ∥22
+                                                                                                          Without mini-batch        71.71            8.87         0.47
+                {                             }                                            𝑛 = 4000         With mini-batch         50.77            8.83         0.36
+where 𝛾 = median ∥ 𝑥𝑖 − 𝑥𝑗 ∥22 ∶ 1 ≤ 𝑖 < 𝑗 ≤ 𝑛 is the median heuristic
+bandwidth parameter.                                                                                      Without mini-batch       306.67            9.30         0.66
+
+
+Appendix D
+Experiment Results
+Simulation results corresponding to sample sizes 𝑛 = 2000 and 𝑛 = 4000
+                                                                                          Appendix F
+are summarized in Tables D1 and D2.
+                                                                                          RHC Data Application
+TABLE D1       |   Simulation results (𝑛 = 2000): Means and standard
+                                                                                          To assess the significance of variables in the dataset, we employed appro-
+deviations.
+                                                                                          priate statistical tests based on variable types to obtain corresponding
+       PMMR            GMM            MinMax      DeepMMR-U DeepMMR-V                     𝑝-values with respect to the treatment 𝐴 and the outcome 𝑌 . Specifi-
+                                                                                          cally, we used the Chi-squared test for categorical and binary variables,
+ S1 1.236 (0.092) 0.916 (0.264) 0.983 (0.252)       1.008 (0.235)        0.927 (0.156)
+                                                                                          and the Mann-Whitney U test for continuous variables to evaluate their
+ S2 1.221 (0.105) 0.911 (0.251) 0.962 (0.279)       0.987 (0.176)        1.021 (0.162)    relationships with the treatment 𝐴. For associations with the outcome
+ S3 1.226 (0.091) 0.887 (0.277) 0.986 (0.251)       0.955 (0.164)        1.006 (0.164)    𝑌 , we utilized the Kruskal-Wallis H test for categorical variables, the
+ S4 1.228 (0.076) 0.888 (0.222) 0.980 (0.223)       0.962 (0.142)        0.988 (0.141)    Mann-Whitney U test for binary variables, and Spearman correlation
+ S5 1.192 (0.088) 0.894 (0.245) 0.974 (0.216)       0.997 (0.164)        0.969 (0.141)    for continuous variables. To reduce the false discovery rate, we applied
+                                                                                          the Bonferroni correction to adjust the significance threshold. Figure F1
+ S6 1.193 (0.098) 0.855 (0.229) 0.961 (0.238)       1.015 (0.156)        1.007 (0.159)
+                                                                                          demonstrates the results of the statistical tests.
+
+
+Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025                                                                                          13 of 14
+FIGURE F1      | Significant variables selected by 𝑝-values.
+
+
+Based on statistical test results, we assigned 20 significant variables to 𝑋.
+These variables are categorized as follows: categorical variables (cat1,
+cat2, scoma1, ninsclas, income), binary variables (cardiohx,
+psychhx, chrpulhx, malighx, dnr1, resp., neuro, gastr), and
+continuous variables (meanbp1_iszero_binary, surv2md1, alb1,
+bili1, meanbp1, crea1, aps1).
+
+
+
+
+14 of 14                                                                        Statistical Analysis and Data Mining: An ASA Data Science Journal, 2025
+
