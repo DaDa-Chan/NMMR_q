@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -151,6 +152,38 @@ def _stratified_kfold_split(dataset, n_splits: int, seed: int) -> List[Tuple[np.
         return list(splitter.split(indices))
 
 
+def _stratified_index_split(dataset,
+                            indices,
+                            val_fraction: float,
+                            seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Split `indices` into (train_idx, val_idx), stratified by dataset.A so the
+    A=0/A=1 ratio in each half matches the ratio in `indices` overall, with
+    `val_fraction` of the samples going to val_idx. Falls back to a plain
+    random split when stratification isn't possible (too few samples of some
+    treatment level to stratify).
+    """
+    if len(indices) == 0:
+        raise ValueError("Cannot split an empty set of indices.")
+
+    indices_arr = np.asarray(indices)
+
+    try:
+        a_labels = _get_a_labels(dataset, indices_arr)
+        train_idx, val_idx = train_test_split(
+            indices_arr, test_size=val_fraction, random_state=seed, stratify=a_labels,
+        )
+    except ValueError:
+        rng = np.random.RandomState(seed)
+        shuffled = indices_arr.copy()
+        rng.shuffle(shuffled)
+        split = max(1, int((1 - val_fraction) * len(shuffled)))
+        train_idx = shuffled[:split]
+        val_idx = shuffled[split:] if split < len(shuffled) else shuffled[:split]
+
+    return train_idx, val_idx
+
+
 def _build_loaders_for_fold(dataset,
                             indices: List[int],
                             batch_size: int,
@@ -160,23 +193,7 @@ def _build_loaders_for_fold(dataset,
     A=0/A=1 的比例与原 fold 整体比例一致),以便 cross-fitting 阶段训练。
     某个 A 取值样本数过少无法分层时,回退到纯随机切分。
     """
-    if len(indices) == 0:
-        raise ValueError("fold 中没有样本。")
-
-    indices_arr = np.array(indices)
-
-    try:
-        a_labels = _get_a_labels(dataset, indices_arr)
-        train_idx, val_idx = train_test_split(
-            indices_arr, test_size=0.2, random_state=seed, stratify=a_labels,
-        )
-    except ValueError:
-        rng = np.random.RandomState(seed)
-        shuffled = indices_arr.copy()
-        rng.shuffle(shuffled)
-        split = max(1, int(0.8 * len(shuffled)))
-        train_idx = shuffled[:split]
-        val_idx = shuffled[split:] if split < len(shuffled) else shuffled[:split]
+    train_idx, val_idx = _stratified_index_split(dataset, indices, val_fraction=0.2, seed=seed)
 
     train_idx = train_idx.tolist()
     val_idx = val_idx.tolist()
@@ -194,6 +211,130 @@ def _build_loaders_for_fold(dataset,
         num_workers=0,
     )
     return train_loader, val_loader
+
+
+def nested_hpo_fold_split(
+    dataset,
+    n_splits: int,
+    seed: int,
+    earlystop_val_fraction: float = 0.1,
+) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Three-way nested split for HPO (training_and_hpo_plan.md section 5.3).
+
+    For each of `n_splits` outer folds (stratified by A):
+      - score_k: the held-out ~1/n_splits of the data. Used ONLY to compute
+        this candidate's final HPO score; it never enters this candidate's
+        gradient training or early stopping.
+      - develop_k: the remaining folds, itself split (stratified by A) into
+          - gradient_train_k (~1 - earlystop_val_fraction of develop_k):
+            gradient updates and the frozen kernel bandwidth come from here.
+          - earlystop_val_k (~earlystop_val_fraction of develop_k): used for
+            the scheduler and early-stopping/best-epoch selection.
+
+    All candidates evaluated with the same (dataset, n_splits, seed) get an
+    identical split, so comparisons between candidates are not confounded by
+    different fold assignments.
+
+    Returns a list of (gradient_train_idx, earlystop_val_idx, score_idx),
+    one tuple per outer fold.
+    """
+    outer_splits = _stratified_kfold_split(dataset, n_splits, seed)
+    nested = []
+    for fold_idx, (develop_idx, score_idx) in enumerate(outer_splits, start=1):
+        gradient_train_idx, earlystop_val_idx = _stratified_index_split(
+            dataset, develop_idx, val_fraction=earlystop_val_fraction, seed=seed + fold_idx,
+        )
+        nested.append((gradient_train_idx, earlystop_val_idx, score_idx))
+    return nested
+
+
+def weighted_fold_mean(scores: List[float], sizes: List[int]) -> float:
+    """Sample-size-weighted mean of per-fold HPO scores (plan eq. 5.3)."""
+    scores_arr = np.asarray(scores, dtype=float)
+    sizes_arr = np.asarray(sizes, dtype=float)
+    return float(np.sum(sizes_arr * scores_arr) / np.sum(sizes_arr))
+
+
+def fold_score_dispersion(scores: List[float]) -> Tuple[float, float]:
+    """
+    Cross-fold standard deviation and standard error of a candidate's
+    per-fold HPO scores (plan section 5.4: "同时保存 fold 间标准差和标准误").
+    """
+    scores_arr = np.asarray(scores, dtype=float)
+    if len(scores_arr) <= 1:
+        return 0.0, 0.0
+    sd = float(np.std(scores_arr, ddof=1))
+    se = sd / math.sqrt(len(scores_arr))
+    return sd, se
+
+
+def insufficient_treatment_groups_reason(
+    dataset,
+    labeled_index_sets: Dict[str, np.ndarray],
+    min_per_group: int = 1,
+) -> Optional[str]:
+    """
+    Plan section 5.8: "Q 的某个处理组在 batch/fold 中没有足够样本" is one of the
+    pre-specified failure conditions for an HPO trial. Checks every named
+    index set (e.g. {"gradient_train": ..., "earlystop_val": ..., "score": ...})
+    for at least `min_per_group` samples of each treatment level; returns a
+    human-readable reason for the first violation found, or None if all are OK.
+    """
+    for label, idx in labeled_index_sets.items():
+        if len(idx) == 0:
+            return f"{label}_empty"
+        a_labels = _get_a_labels(dataset, idx)
+        n0 = int((a_labels < 0.5).sum())
+        n1 = int((a_labels > 0.5).sum())
+        if n0 < min_per_group or n1 < min_per_group:
+            return f"{label}_insufficient_treatment_groups(n0={n0}, n1={n1})"
+    return None
+
+
+def select_one_se_candidate(study):
+    """
+    Apply the one-standard-error candidate selection rule (plan section 5.7)
+    to a completed Optuna study.
+
+    Expects every COMPLETE trial to carry these user attrs (set by the
+    objective() in nmmr_q_experiments.py / nmmr_h_experiments.py):
+    `fold_se`, `network_depth`, `network_width`, `l2_penalty`,
+    `total_train_seconds`.
+
+    Rule:
+      1. lambda_min = the trial with the lowest (best) score.
+      2. SE_min = lambda_min's cross-fold standard error (`fold_se`).
+      3. Among trials with score <= lambda_min.value + SE_min, pick the
+         "simplest": shallower network -> narrower network -> stronger L2
+         (larger l2_penalty) -> shorter total training time as the final
+         tie-break.
+
+    Returns (selected_trial, best_trial): `best_trial` is the pure-minimum
+    trial, kept for audit per the plan ("同时报告纯最小值规则的选择作为审计信息").
+    """
+    import optuna  # local import: only HPO selection needs this, not every caller of this module
+
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if not completed:
+        raise RuntimeError("No completed HPO trials to select a candidate from.")
+
+    best_trial = min(completed, key=lambda t: t.value)
+    se_min = best_trial.user_attrs.get("fold_se", 0.0) or 0.0
+    threshold = best_trial.value + se_min
+
+    candidates = [t for t in completed if t.value <= threshold]
+
+    def simplicity_key(t):
+        return (
+            t.user_attrs.get("network_depth", float("inf")),
+            t.user_attrs.get("network_width", float("inf")),
+            -t.user_attrs.get("l2_penalty", 0.0),  # larger l2_penalty (stronger) sorts first
+            t.user_attrs.get("total_train_seconds", float("inf")),
+        )
+
+    selected_trial = min(candidates, key=simplicity_key)
+    return selected_trial, best_trial
 
 
 def _build_dataset_view(dataset, indices: List[int]):

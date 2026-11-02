@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import pandas as pd
-import copy  
-import optuna 
+import copy
+import math
+import optuna
 
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import KFold
@@ -11,6 +12,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer,NMMR_Q_Trainer_SGD, NMMR_Q_Trainer_RHC, NMMR_Q_DualModel
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
+from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.data.ate.sgd_pv import generate_data
 from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset
 from src.models.experiment_common import (
@@ -19,7 +21,11 @@ from src.models.experiment_common import (
     _suggest_from_trial,
     _build_loaders_for_fold,
     _build_dataset_view,
-    _stratified_kfold_split,
+    nested_hpo_fold_split,
+    weighted_fold_mean,
+    fold_score_dispersion,
+    insufficient_treatment_groups_reason,
+    select_one_se_candidate,
 )
 from src.utils import get_device, empty_device_cache, set_random_seed, make_seed_bundle
 
@@ -41,41 +47,45 @@ def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_n
             dump_folder=dump_folder,
         )
 
-def _evaluate_q_loss(trainer,
-                     model: torch.nn.Module,
-                     dataset,
-                     indices: List[int]) -> float:
+def _compute_unified_q_score(trainer,
+                             model: torch.nn.Module,
+                             dataset,
+                             indices: List[int]) -> Tuple[float, int]:
     """
-    计算指定子集上的 q-loss 用于交叉验证评分。
+    Unified HPO scoring metric for Q (plan section 5.4): regardless of
+    whether this candidate trained with the U- or V-statistic objective,
+    candidates are always compared on the V-statistic moment risk
+        S_Q(lambda) = 0.5 * sum_{a in {0,1}} (1/n^2) rho_a^T K rho_a,
+    evaluated on `indices` -- a held-out "score" fold that must never have
+    participated in this candidate's gradient training or early stopping
+    (see nested_hpo_fold_split). Uses the kernel bandwidth frozen by the
+    trainer on its own gradient-training subset, not refit here.
     """
     view = _build_dataset_view(dataset, indices)
+    scorer = NMMR_Q_Loss(use_u_statistic=False)
     with torch.no_grad():
         A = view.A.to(trainer.device)
         W = view.W.to(trainer.device)
         X = view.X.to(trainer.device)
         Z = view.Z.to(trainer.device)
-        
+
         k_matrix = trainer._compute_kernel_matrix(W, X)
-        loss_total = 0.0
-        
-        # Loss 0
+        score_total = torch.zeros((), device=trainer.device)
+
         mask0 = (A < 0.5).squeeze()
         if mask0.sum() > 0:
-
             inputs0 = torch.cat((Z[mask0], X[mask0]), dim=1)
             pred0 = model.net0(inputs0)
-            loss0 = trainer.q_loss(pred0, mask0, k_matrix)
-            loss_total += loss0
-            
-        # Loss 1
+            score_total = score_total + scorer(pred0, mask0, k_matrix)
+
         mask1 = (A > 0.5).squeeze()
         if mask1.sum() > 0:
             inputs1 = torch.cat((Z[mask1], X[mask1]), dim=1)
             pred1 = model.net1(inputs1)
-            loss1 = trainer.q_loss(pred1, mask1, k_matrix)
-            loss_total += loss1
+            score_total = score_total + scorer(pred1, mask1, k_matrix)
 
-    return float(loss_total.item())
+    unified_score = 0.5 * score_total
+    return float(unified_score.item()), len(indices)
 
 def _run_optuna_tuning(
     data_name: str,
@@ -112,12 +122,39 @@ def _run_optuna_tuning(
                 trial, param_name, config
             )
 
-        fold_val_losses: List[float] = []
+        # Record the fields the one-SE selection rule (plan 5.7) needs to rank
+        # candidates by simplicity, regardless of whether they were searched
+        # or came from the fixed base config.
+        trial.set_user_attr("network_depth", current_params.get("network_depth"))
+        trial.set_user_attr("network_width", current_params.get("network_width"))
+        trial.set_user_attr("l2_penalty", current_params.get("l2_penalty"))
 
-        # 运行 K-fold CV 来评估这组参数（按处理变量 A 分层，保证 train/val 比例一致）
-        for fold_idx, (train_idx, val_idx) in enumerate(
-            _stratified_kfold_split(dataset, n_splits, random_seed), start=1
+        fold_scores: List[float] = []
+        fold_sizes: List[int] = []
+        fold_train_seconds: List[float] = []
+
+        # Nested three-way split per outer fold (plan section 5.3):
+        # gradient_train_idx/earlystop_val_idx drive this candidate's training
+        # and early stopping; score_idx is held out from both and only used
+        # for the final unified score below, so the same data never both
+        # selects this candidate's epoch and scores the candidate.
+        for fold_idx, (gradient_train_idx, earlystop_val_idx, score_idx) in enumerate(
+            nested_hpo_fold_split(dataset, n_splits, random_seed), start=1
         ):
+            # Plan 5.8: a treatment group with too few samples in any of the
+            # three splits is a pre-specified failure condition for this trial.
+            insufficient_reason = insufficient_treatment_groups_reason(
+                dataset,
+                {
+                    "gradient_train": gradient_train_idx,
+                    "earlystop_val": earlystop_val_idx,
+                    "score": score_idx,
+                },
+            )
+            if insufficient_reason is not None:
+                trial.set_user_attr("failure_reason", f"fold_{fold_idx}_{insufficient_reason}")
+                return float("inf")
+
             # Explicitly derive this fold's init seed from (random_seed, trial, fold_idx)
             # instead of relying on however much of the global RNG stream earlier
             # trials/folds already consumed.
@@ -129,39 +166,59 @@ def _run_optuna_tuning(
             )
 
             train_loader = DataLoader(
-                dataset=Subset(dataset, train_idx.tolist()),
+                dataset=Subset(dataset, gradient_train_idx.tolist()),
                 batch_size=batch_size,
                 shuffle=True,
                 num_workers=0,
             )
-            val_loader = DataLoader(
-                dataset=Subset(dataset, val_idx.tolist()),
+            earlystop_loader = DataLoader(
+                dataset=Subset(dataset, earlystop_val_idx.tolist()),
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=0,
             )
 
             try:
-                model, _train_result = trainer.train(train_loader, val_loader)
-                val_loss = _evaluate_q_loss(
-                    trainer, model, dataset, val_idx.tolist()
+                model, train_result = trainer.train(train_loader, earlystop_loader)
+                # Plan 5.8: a fold that never got a valid checkpoint is a failure.
+                if train_result.stop_reason == "no_valid_checkpoint":
+                    trial.set_user_attr("failure_reason", f"fold_{fold_idx}_no_valid_checkpoint")
+                    return float("inf")
+
+                # Unified V-statistic score (plan 5.4), on the untouched score fold.
+                fold_score, fold_n = _compute_unified_q_score(
+                    trainer, model, dataset, score_idx.tolist()
                 )
-                fold_val_losses.append(val_loss)
-            
+                # Plan 5.8: NaN/Inf score is a failure, not a value to average in.
+                if not math.isfinite(fold_score):
+                    trial.set_user_attr("failure_reason", f"fold_{fold_idx}_nonfinite_score")
+                    return float("inf")
+
+                fold_scores.append(fold_score)
+                fold_sizes.append(fold_n)
+                fold_train_seconds.append(train_result.train_seconds)
+
             except Exception as e:
+                trial.set_user_attr("failure_reason", f"fold_{fold_idx}_exception: {e}")
                 print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
                 return float("inf")
-            
+
             finally:
                 if 'model' in locals():
                     del model
                 if 'trainer' in locals():
                     del trainer
-                del train_loader, val_loader
+                del train_loader, earlystop_loader
                 empty_device_cache(get_device())
 
-        avg_val_loss = np.mean(fold_val_losses)
-        return avg_val_loss
+        summary_score = weighted_fold_mean(fold_scores, fold_sizes)
+        fold_sd, fold_se = fold_score_dispersion(fold_scores)
+        trial.set_user_attr("fold_scores", fold_scores)
+        trial.set_user_attr("fold_sizes", fold_sizes)
+        trial.set_user_attr("fold_sd", fold_sd)
+        trial.set_user_attr("fold_se", fold_se)
+        trial.set_user_attr("total_train_seconds", sum(fold_train_seconds))
+        return summary_score
 
 
     print(
@@ -173,12 +230,19 @@ def _run_optuna_tuning(
     study.optimize(objective, n_trials=n_trials)
 
     print(f"\n[Optuna] 调优完成。")
-    print(f"  最佳 Trial: {study.best_trial.number}")
-    print(f"  最佳 q-loss: {study.best_value:.6f}")
-    print(f"  最佳参数: {study.best_params}")
+    # Plan 5.7: the one-SE rule, not the pure minimum, is the primary selection
+    # rule; the pure-minimum trial is kept only as audit info alongside it.
+    selected_trial, best_trial = select_one_se_candidate(study)
+    print(f"  纯最小值 Trial(仅作审计): {best_trial.number}, "
+          f"score={best_trial.value:.6f}, params={best_trial.params}")
+    print(f"  One-SE 规则选中的 Trial: {selected_trial.number}")
+    print(f"  最佳 q-loss (unified V-statistic score): {selected_trial.value:.6f}")
+    print(f"  fold_sd={selected_trial.user_attrs.get('fold_sd')}, "
+          f"fold_se={selected_trial.user_attrs.get('fold_se')}")
+    print(f"  最佳参数: {selected_trial.params}")
 
-    # 合并并返回最终的最优参数
-    final_best_params = {**base_train_params, **study.best_params}
+    # 合并并返回最终的最优参数(按 one-SE 规则选中的候选,而非纯最小值候选)
+    final_best_params = {**base_train_params, **selected_trial.params}
 
     if save_dir is not None:
         save_path = Path(save_dir)
