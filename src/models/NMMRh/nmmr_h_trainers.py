@@ -88,7 +88,9 @@ class NMMR_H_Trainer:
         # (i.e. use the fitted bandwidth as-is) so existing configs are unaffected.
         self.kernel_bandwidth_multiplier = float(train_params.get('kernel_bandwidth_multiplier', 1.0))
         self._frozen_sigma: Optional[float] = None
-        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+        # PyTorch 2.2 exposes GradScaler under torch.cuda.amp; the
+        # torch.amp.GradScaler entry point was added in a later release.
+        self.scaler = GradScaler() if self.use_amp else None
 
         check_loss_name_matches_u_statistic(train_params)
         self.h_loss = NMMR_H_Loss(use_u_statistic=self.train_params.get('use_u_statistic', False))

@@ -91,7 +91,9 @@ class NMMR_Q_Trainer:
         self.l2_penalty = train_params['l2_penalty']
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
-        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+        # PyTorch 2.2 exposes GradScaler under torch.cuda.amp; the
+        # torch.amp.GradScaler entry point was added in a later release.
+        self.scaler = GradScaler() if self.use_amp else None
         # Multiplier applied to the fitted median-heuristic bandwidth; defaults to 1.0
         # (i.e. use the fitted bandwidth as-is) so existing configs are unaffected.
         self.kernel_bandwidth_multiplier = float(train_params.get('kernel_bandwidth_multiplier', 1.0))

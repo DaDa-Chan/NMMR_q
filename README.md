@@ -70,6 +70,16 @@ pip install -r requirements.txt
 
 主要依赖：PyTorch 2.2、scikit-learn 1.5、Optuna 4.6、TensorBoard 2.16。
 
+### CUDA 服务器检查
+
+代码按 `CUDA > Apple MPS > CPU` 的顺序自动选择设备。在 NVIDIA 服务器上安装依赖后，先确认当前 Python 环境确实识别到了 GPU：
+
+```bash
+python -c "import torch; print('cuda_available =', torch.cuda.is_available()); print('device =', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+4090 服务器应输出 `cuda_available = True`，并显示对应的 NVIDIA GPU 名称。若这里是 `False`，不要直接开始正式 HPO，应先检查服务器驱动、CUDA 版 PyTorch 和当前虚拟环境。
+
 ## 数据准备
 
 ### 合成数据 (SGD)
@@ -91,9 +101,11 @@ python src/data/ate/sgd_pv.py
 
 ## 实验工作流
 
-项目采用**调参与正式实验分离**的工作流。带搜索范围的 config 只能用于 HPO；`src/experiment.py` 仅接受已解析为固定标量的参数，不会再内联启动 Optuna。
+项目采用**调参与正式实验分离**的工作流。带搜索范围的训练参数只用于 HPO，任何正式训练入口都不会内联启动 Optuna。HPO 产生的 candidate 经人工确认后复制到 `configs/sgd_frozen/`；`src/experiment.py --mode traditional` 分别读取数据配置和这份 frozen config（见第 9 节）。
 
 ## SGD HPO 调参
+
+服务器环境准备、四种方法的完整命令、产物检查、candidate 晋升和 standalone 使用步骤，见 [HPO 服务器运行与结果使用指南](HPO服务器运行与结果使用指南.md)。
 
 ### 1. 入口与支持的方法
 
@@ -142,6 +154,8 @@ Q-V -> configs/sgd/nmmr_q/nmmr_q_v_sgd.json
 
 修改搜索范围时直接修改对应的现有 config，但必须为新范围使用新的 `--results_dir`。当前脚本不会根据新建的任意 config 文件名自动切换搜索配置。
 
+搜索 config 会被逐字节保存到 `--results_dir`。只要搜索 config 的内容发生变化（包括删除或增加一个固定字段），旧目录就不能继续追加 trial；应保留旧目录用于追溯，并为新配置使用新的 `results_dir`。
+
 ### 3. 调参的完整顺序
 
 ```text
@@ -189,7 +203,9 @@ data/pilot/
 
 每个 Optuna trial 对应一组超参数。每组参数在 pilot-select 上做 K-fold 评估，并使用独立 held-out fold 的 V-statistic moment risk 统一评分。
 
-U/V 是训练目标的区别；为了让 U/V 可比，HPO 排名使用相同的 held-out V-statistic score。有 NaN/Inf、无有效 checkpoint、Q 明显数值爆炸或任一 fold 失败的 trial 记为失败，不进入有限 trial 排名。
+U/V 是训练目标的区别；为了让 U/V 可比，HPO 排名使用相同的 held-out V-statistic score。有 NaN/Inf、无有效 checkpoint、某折缺少所需的处理组，或任一 fold 无法完成有效评分时，该 trial 记为失败，不进入有限 trial 排名。
+
+Round 1 不使用每折训练时间作为通过/失败门槛。`train_seconds` 仍会写入 trial/fold 记录，用于估算计算成本，但服务器快慢不会改变一个统计方法是否有效。
 
 如果本次新增的 trial（以及旧 study 中已有的 trial）全部失败，代码会在排名/打印"最佳参数"之前就抛出 `NoFiniteRound1TrialError` 并打印各失败原因的计数：不会进入 Round 2，不会跑 pilot-confirm，也不会生成任何 candidate；`run_pilot_protocol.py` 会把该方法报告为 `round1_failed` 并继续处理 `--methods` 里的其他方法。
 
@@ -202,6 +218,8 @@ $$N_{\text{Round 2 fits}}=\text{top\_k}\times |\text{init seeds}|\times \text{n\
 例如 `top_k=5`、3个 init seed、5-fold 时，每个方法需要 $5\times3\times5=75$ 次 Round 2 训练。
 
 同一候选只要有任意一个 (seed, fold) 触发失败条件，该候选的分数就整体记为 `+inf`，不会用剩下跑成功的 fold 顶上。如果 `top_k` 个候选在 Round 2 后全部是 `+inf`，代码抛出 `NoFiniteRound2CandidateError`（与 Round 1 失败是不同的异常类型），`run_pilot_protocol.py` 报告为 `round2_failed`，同样不生成 candidate、不跑 confirm。
+
+Round 2 同样不以训练耗时作为失败条件；每折耗时只作诊断。当前只有 Round 1 的 Optuna SQLite study 可以追加/恢复，Round 2 尚无断点续跑机制，因此正式运行建议按方法分别启动，并为每种方法保留独立的运行目录。
 
 最终使用 one-standard-error rule：先找平均矩风险最小的 candidate，再在其 one-SE 范围内优先选择更简单的网络。
 
@@ -263,11 +281,11 @@ python scripts/run_pilot_protocol.py \
   --scenario 1 \
   --base_seed 20261103 \
   --data_dir data/pilot \
-  --results_dir tune_results/q_u_formal_v1
+  --results_dir tune_results/q_u_formal_v2
 ```
 
 没有 `--config_dir`：这条命令永远不会碰 `configs/sgd_frozen/`。跑完之后去看
-`tune_results/q_u_formal_v1/candidates/q_u_candidate_config.json` 里的
+`tune_results/q_u_formal_v2/candidates/q_u_candidate_config.json` 里的
 `confirm_status`，确认是 `passed` 后再自己手动复制到
 `configs/sgd_frozen/q_u_frozen_config.json`（见第 9 节）。
 
@@ -288,10 +306,12 @@ python scripts/run_pilot_protocol.py \
   --patience 30 \
   --base_seed 20261103 \
   --data_dir data/pilot \
-  --results_dir tune_results/q_u_formal_v1
+  --results_dir tune_results/q_u_formal_v2
 ```
 
 `--n_trials 20` 表示“本次再追加20个”。如果原 study 已有30个 trial，运行后累计50个；原有30个不会被删除。恢复运行时，Optuna sampler 的种子会根据已有 trial 数重新派生，不会因为复用同一个 sampler seed 而整批重放第一批的参数——但不同 seed 之间偶然抽到同一个点（例如某个可选项很少的分类参数）仍然可能发生，这不是本次修复要消除的目标。
+
+脚本追加 Round 1 trial 后会重新执行 Round 2 和 pilot-confirm。因此，追加 trial 应视为同一次 HPO 工作尚未结束，而不是在看过 confirm 结果后反复追加、再用同一份 confirm 数据挑 candidate。正式决策时只审查最终一次运行产生的 candidate；不要根据多次 confirm 的好坏决定是否继续追加。
 
 #### 4.4 修改搜索范围
 
@@ -302,6 +322,33 @@ python scripts/run_pilot_protocol.py \
 ```
 
 不同搜索范围的 candidate 默认不合并。coarse study 用于找合理范围，refined/formal study 用于产生最终 candidate。
+
+#### 4.5 在 GPU 服务器上的推荐顺序
+
+1. 提交并同步最新代码到服务器，确认工作目录没有混入旧版本配置。
+2. 使用“CUDA 服务器检查”中的命令确认 PyTorch 识别到 GPU。
+3. 先为单个方法运行 smoke test，检查完整流程、显存和大致耗时。
+4. smoke test 使用独立目录，例如 `tune_results/q_u_smoke_server`；不要把它作为正式 study 继续追加。
+5. 正式 HPO 为每个方法使用独立且全新的目录，例如 `q_u_formal_v2`、`q_v_formal_v2`。
+6. 长任务建议放在 `tmux`、`screen` 或服务器作业调度系统中。Round 2 中断后需要从该方法的 Round 2 重新开始。
+7. 运行结束后检查 candidate、Round 1/2 表和 confirm 报告，再人工晋升通过的 candidate。
+
+例如服务器首次 smoke test：
+
+```bash
+python scripts/run_pilot_protocol.py \
+  --methods Q-U \
+  --n_pilot_select 300 \
+  --n_pilot_confirm 300 \
+  --n_trials 3 \
+  --top_k 1 \
+  --round2_init_seeds 11 \
+  --n_epochs 30 \
+  --n_splits 3 \
+  --patience 5 \
+  --data_dir data/pilot \
+  --results_dir tune_results/q_u_smoke_server
+```
 
 ### 5. 命令行参数
 
@@ -345,13 +392,13 @@ python scripts/run_pilot_protocol.py \
 
 ```bash
 --methods Q-U \
---results_dir tune_results/q_u_formal_v1
+--results_dir tune_results/q_u_formal_v2
 ```
 
 则主要产物为：
 
 ```text
-tune_results/q_u_formal_v1/
+tune_results/q_u_formal_v2/
 ├── search_config_snapshot.json       # 本次运行使用的搜索 config 原文
 ├── optuna_studies/
 │   └── q_u_round1.db
@@ -370,8 +417,8 @@ tune_results/q_u_formal_v1/
 |---|---|
 | `search_config_snapshot.json`（或 `search_configs/{method}.json`） | 该方法这次运行实际读取的搜索 config 原始内容，逐字节复制，用于追溯 |
 | `q_u_round1.db` | Optuna SQLite study，保留所有历史 trial，用于追加/恢复 Round 1 |
-| `q_u_round1_trials.csv` | Round 1 的 trial/fold 超参数、seed、矩风险、训练结果和失败原因 |
-| `q_u_round2_finalists.csv` | top-k candidate 在多 init seed、多 fold 下的重新评估结果 |
+| `q_u_round1_trials.csv` | Round 1 的 trial/fold 超参数、seed、矩风险、训练结果、训练时间和失败原因；训练时间不参与 pass/fail |
+| `q_u_round2_finalists.csv` | top-k candidate 在多 init seed、多 fold 下的重新评估结果及诊断信息；训练时间不参与 pass/fail |
 | `q_u_pilot_confirm_report.json` | 独立 confirm 的 ATE、moment risk、Q 诊断、真桥 MSE 和通过/失败原因 |
 | `candidates/q_u_candidate_config.json` | 这次选中的候选参数（`FrozenConfig`），`confirm_status`/`confirm_failure_reasons` 字段记录 confirm 是否通过及原因；**无论通过还是失败都会写**，从来不是正式 config |
 
@@ -406,7 +453,7 @@ pilot-confirm 只是最终的 passed/failed 检查，不用 confirm ATE 误差�
 
 ### 9. HPO candidate 与正式实验的接口
 
-HPO 生成的 `candidates/q_u_candidate_config.json` 是 `FrozenConfig` 产物，它包含选定参数、seed、Round 1/2 信息、`status`、`confirm_status`/`confirm_failure_reasons` 和 `config_hash`。只有当你自己确认 `confirm_status=="passed"` 之后，手动把这个文件复制成 `configs/sgd_frozen/q_u_frozen_config.json`，它才算是正式 config——HPO 代码本身不会做这一步。
+HPO 生成的 `candidates/q_u_candidate_config.json` 是 `FrozenConfig` 产物，它包含选定参数、seed、Round 1/2 信息、`status`、`confirm_status`/`confirm_failure_reasons` 和用于追溯的 `config_hash`。只有当你自己确认 `confirm_status=="passed"` 之后，手动把这个文件复制成 `configs/sgd_frozen/q_u_frozen_config.json`，它才算是正式 config——HPO 代码本身不会做这一步。
 
 `src/experiment.py --mode traditional`（standalone：在单个 train/test 划分上训练一个模型，作为非 cross-fitting 的横向对比）直接读取这个扁平的 `FrozenConfig` JSON，两个配置文件各自分工：
 
@@ -492,7 +539,7 @@ $$\hat{\tau}_{\text{PDR}} = \frac{1}{n}\sum_i \left[(2A_i-1)\,q_{A_i}(Z_i,X_i)(Y
 
 - **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO；`experiment.py --mode traditional` 的 `--config_path` 也可以复用这类文件，只取其中的 `data_configs`
 - **旧格式固定实验配置**（如 `nmmr_q_v_sgd_fixed.json`）：包含 `data_configs` 和标量化的 `train_params`，可传给 `experiment.py --mode cross_fitting`（默认模式）
-- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和校验哈希；`experiment.py --mode traditional` 通过 `--frozen_config_path` 直接读取这个格式（见第 9 节）
+- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；`experiment.py --mode traditional` 通过 `--frozen_config_path` 直接读取这个格式（见第 9 节）
 
 | 配置 | 数据集 | 模型 | 损失 |
 |------|--------|------|------|
