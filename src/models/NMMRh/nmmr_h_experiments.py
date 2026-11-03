@@ -740,58 +740,116 @@ def NMMR_H_experiment(dataset_name: str,
     print("----------------------------------")
 
 def train_h_standalone(data_configs, train_params, dataset_name, scenario, save_dir, log_folder, random_seed=42,
-                        data_seed=None, init_seed=None, tuning_seed=None):
-
+                        data_seed=None, init_seed=None, save_model=False):
     """
-    独立训练模式：
-    1. 加载/生成数据
-    2. (可选) 使用 Optuna 进行 K-Fold 调参
-    3. 使用最佳参数在全量数据上训练
-    4. 保存模型权重和最佳参数配置
+    Standalone (non-cross-fitting) training path, kept as a horizontal
+    comparison point against cross-fitting (精简与config管理.md section
+    6.6 / Phase D). Only reads an already-frozen `train_params` (no search
+    space -- Optuna runs exclusively in scripts/run_pilot_protocol.py now,
+    this function never launches it), trains ONE model on a single
+    train/test split with those same frozen parameters, and reports a
+    non-cross-fitting effect estimate, held-out test error (the same
+    unified moment-risk scorer used everywhere else in this pipeline), and
+    the total wall-clock runtime. Model weights are only written to
+    `save_dir` when `save_model=True` -- never by default, so Monte Carlo
+    repetitions don't accumulate one checkpoint per repetition.
     """
     data_seed = data_seed if data_seed is not None else random_seed
     init_seed = init_seed if init_seed is not None else random_seed
-    tuning_seed = tuning_seed if tuning_seed is not None else random_seed
 
     device = get_device()
-    save_path = Path(save_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n[Standalone_h] 启动独立训练流程 | 数据集: {dataset_name} | Scenario: {scenario}")
+    print(f"\n[Standalone_h] 启动独立(非 cross-fitting)训练流程 | 数据集: {dataset_name} | Scenario: {scenario}")
 
     dataset_key = dataset_name.lower()
     if dataset_key == 'sgd':
-        n_samples = data_configs.get('n_samples',2000)
+        n_samples = data_configs.get('n_samples', 2000)
         df = generate_data(n_samples=n_samples, scenario=scenario, seed=data_seed)
-        train_dataset = SGDDataset(csv_path='', df=df, device=device)
-        
+        dataset = SGDDataset(csv_path='', df=df, device=device)
+
     elif dataset_key == 'rhc':
-        print(f"[Standalone] 加载 RHC 训练数据...")
-        data_dir = data_configs.get('data_path')
-        use_all_x = data_configs.get('use_all_X', False)
-        train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=data_dir, device=device)
+        # Phase D explicit scope limit (精简与config管理.md section 6.6), not an
+        # oversight: _run_cross_fitting's RHC population is the merged
+        # train+val+test set, while a single RHCDataset(split='train') here
+        # would be a smaller, different population -- not a valid horizontal
+        # comparison against cross-fitting. Revisit once RHC's standalone
+        # split is unified with cross-fitting's population.
+        raise NotImplementedError(
+            "train_h_standalone 目前只支持 dataset_name='sgd'。RHC 的 standalone 数据 "
+            "划分与 cross-fitting 使用的全量 RHC 数据(train+val+test 合并)不一致，"
+            "暂不提供可横向比较的 RHC standalone 流程。"
+        )
     else:
         raise ValueError(f"未知的 dataset_name: {dataset_name}")
-    
-    
-    train_params_copy = copy.deepcopy(train_params)
-    base_params, search_space = _parse_optuna_space(train_params_copy)
-    n_splits = int(base_params.get('n_splits', 5))
 
-    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))
+    # train_h_standalone only ever consumes an already-frozen config (same
+    # invariant NMMR_H_experiment enforces for its own entrypoint): a
+    # leftover Optuna search space here is a config error, not something to
+    # tune around.
+    _, search_space = _parse_optuna_space(copy.deepcopy(train_params))
+    if search_space:
+        raise ValueError(
+            f"train_h_standalone no longer runs HPO inline; train_params still has "
+            f"an Optuna search space for {list(search_space)}. "
+            "Run scripts/run_pilot_protocol.py first and provide a frozen config."
+        )
 
+    n_splits = int(train_params.get('n_splits', 5))
+    batch_size = train_params['batch_size']
+
+    start_time = time.time()
     set_random_seed(init_seed)
-    _run_optuna_tuning(
-        data_name=dataset_key,
-        dataset=train_dataset,
-        n_splits=n_splits,
-        n_trials=hpo_n_trials,
-        base_train_params=base_params,
-        search_space=search_space,
-        data_configs=data_configs,
-        random_seed=random_seed,
-        log_folder=log_folder,
-        save_dir=save_dir,
-        scenario=scenario,
-        tuning_seed=tuning_seed,
+
+    # Reuses the same outer KFold convention _run_cross_fitting uses (same
+    # seed offset, same 1/n_splits held-out fraction) but takes only its
+    # first split -- a single train/test split for ONE model, not K folds.
+    split_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+    train_idx, eval_idx = next(iter(split_kfold.split(np.arange(len(dataset)))))
+    train_idx = train_idx.tolist()
+    eval_idx = eval_idx.tolist()
+
+    dump_folder = None
+    if log_folder is not None:
+        dump_folder = Path(log_folder)
+        dump_folder.mkdir(parents=True, exist_ok=True)
+
+    trainer = _create_trainer(data_configs, train_params, random_seed, dump_folder, dataset_key)
+    train_loader, val_loader = _build_loaders_for_fold(
+        dataset=dataset,
+        indices=train_idx,
+        batch_size=batch_size,
+        seed=random_seed + 1,
     )
+    model, train_result = trainer.train(train_loader, val_loader)
+    print(f"[Standalone] train result: stop_reason={train_result.stop_reason}, "
+          f"best_epoch={train_result.best_epoch}, best_val_score={train_result.best_val_score}")
+
+    eval_view = _build_dataset_view(dataset, eval_idx)
+    effect_estimate = trainer.predict(model, eval_view)
+    test_error, n_eval = _compute_unified_h_score(trainer, model, dataset, eval_idx)
+    total_runtime_seconds = time.time() - start_time
+
+    if save_model:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        model_path = save_path / f"{dataset_key}_s{scenario}_standalone_h_seed{random_seed}.pth"
+        torch.save(model.state_dict(), model_path)
+        print(f"[Standalone] 模型权重已保存至 {model_path}")
+
+    empty_device_cache(trainer.device)
+
+    print(f"\n--- [Standalone] 非 cross-fitting ATE(POR) (Seed {random_seed}) ---")
+    print(f"POR = {effect_estimate.item():.4f} | test_error(moment_risk) = {test_error:.6f} | "
+          f"total_runtime = {total_runtime_seconds:.2f}s")
+    print("----------------------------------")
+
+    return {
+        "POR": effect_estimate.item(),
+        "test_error": test_error,
+        "n_test": n_eval,
+        "total_runtime_seconds": total_runtime_seconds,
+        "best_epoch": train_result.best_epoch,
+        "stopped_early": train_result.stopped_early,
+        "stop_reason": train_result.stop_reason,
+        "best_state_restored": train_result.best_state_restored,
+    }

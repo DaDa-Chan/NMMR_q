@@ -404,25 +404,31 @@ HPO 代码（`save_pipeline_artifacts`）只写 `--results_dir`，不接受任�
 
 pilot-confirm 只是最终的 passed/failed 检查，不用 confirm ATE 误差、真桥 MSE 或 confirm moment risk 在多个 candidate 之间继续挑参数。H-U、H-V、Q-U、Q-V 是后续横向比较的四种方法，每种方法各自保留一份最终 config，不是从四种方法中只选一种。
 
-### 9. HPO candidate 与正式实验的当前接口
+### 9. HPO candidate 与正式实验的接口
 
 HPO 生成的 `candidates/q_u_candidate_config.json` 是 `FrozenConfig` 产物，它包含选定参数、seed、Round 1/2 信息、`status`、`confirm_status`/`confirm_failure_reasons` 和 `config_hash`。只有当你自己确认 `confirm_status=="passed"` 之后，手动把这个文件复制成 `configs/sgd_frozen/q_u_frozen_config.json`，它才算是正式 config——HPO 代码本身不会做这一步。
 
-无论是 candidate 还是复制后的 `frozen_config.json`，它与旧的 `configs/sgd/.../*_fixed.json` 都不是同一外层 JSON 格式：
+`src/experiment.py --mode traditional`（standalone：在单个 train/test 划分上训练一个模型，作为非 cross-fitting 的横向对比）直接读取这个扁平的 `FrozenConfig` JSON，两个配置文件各自分工：
 
-- `FrozenConfig` 是扁平的调参产物；
-- `experiment.py --config_path` 当前仍要求包含 `data_configs` 和 `train_params` 的实验 config。
+- `--config_path`：只提供数据/DGP 配置（样本量、数据 seed、scenario），不再要求其中的 `train_params` 是标量——哪怕该文件仍带着 Optuna 搜索空间（例如复用现成的 `configs/sgd/nmmr_q/nmmr_q_u_sgd.json`）也没关系，因为这个模式根本不读取它的 `train_params`。
+- `--frozen_config_path`：指向你手动放进 `configs/sgd_frozen/` 的正式 `FrozenConfig` 文件；`experiment.py` 通过 `hpo_protocol.FrozenConfig.load()` 解析，再用它自带的 `to_train_params()` 得到固定训练参数——不会在 `experiment.py` 内重新实现一套字段转换，也不会自动从 `candidates/` 选、自动跑 Optuna，或覆盖/修改这个 frozen config 文件。
 
-因此，当前不要直接将 HPO 的 candidate/frozen config 传给 `experiment.py --config_path`。HPO 内部的 pilot-confirm 会通过 `FrozenConfig.to_train_params()` 正确解析它；正式 loader 与手动 promotion 流程仍需统一。
+使用前会做三项检查，任一不满足都会直接报错并拒绝运行：
 
-在该接口完成前，现有固定参数实验仍使用旧格式的 `*_fixed.json`：
+1. `confirm_status == "passed"`；
+2. `method_id` 与 `--model_name` 一致（如 `Q-*` 配 `nmmr_q`），且 `method_id` 的 U/V 后缀与文件自身的 `training_objective` 字段一致；
+3. 解析出的训练参数里不能再有 Optuna 搜索空间或 `hpo_n_trials`。
 
 ```bash
 python src/experiment.py \
+  --mode traditional \
   --dataset_name sgd \
   --model_name nmmr_q \
-  --config_path configs/sgd/nmmr_q/nmmr_q_v_sgd_fixed.json
+  --config_path configs/sgd/nmmr_q/nmmr_q_u_sgd.json \
+  --frozen_config_path configs/sgd_frozen/q_u_frozen_config.json
 ```
+
+standalone 的职责保持精简（精简与config管理.md section 6.6）：只训练一个模型（单个 train/validation/test 划分，validation 只用于早停，test 用于最终效应估计和 moment-risk），Q 返回 `PIPW`，H 返回 `POR`，连同 `test_error`（与 HPO/confirm 相同的 held-out moment-risk 打分）和 `total_runtime_seconds`；默认不保存模型权重，传入 `--save_model` 才会写入 `--model_dir`。目前只支持 `--dataset_name sgd`——RHC 的 standalone 人口（仅 train split）与 cross-fitting 实际使用的全量 RHC 数据（train+val+test 合并）不一致，传 `--dataset_name rhc` 会直接抛 `NotImplementedError`，而不是跑出一个看似能跑、实际无法横向比较的结果。
 
 ### 双稳健估计 (PDR)
 
@@ -484,9 +490,9 @@ $$\hat{\tau}_{\text{PDR}} = \frac{1}{n}\sum_i \left[(2A_i-1)\,q_{A_i}(Z_i,X_i)(Y
 
 当前项目中有三种相关文件：
 
-- **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO
-- **旧格式固定实验配置**（如 `nmmr_q_v_sgd_fixed.json`）：包含 `data_configs` 和标量化的 `train_params`，当前可传给 `experiment.py`
-- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和校验哈希；当前尚不能直接传给 `experiment.py --config_path`
+- **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO；`experiment.py --mode traditional` 的 `--config_path` 也可以复用这类文件，只取其中的 `data_configs`
+- **旧格式固定实验配置**（如 `nmmr_q_v_sgd_fixed.json`）：包含 `data_configs` 和标量化的 `train_params`，可传给 `experiment.py --mode cross_fitting`（默认模式）
+- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和校验哈希；`experiment.py --mode traditional` 通过 `--frozen_config_path` 直接读取这个格式（见第 9 节）
 
 | 配置 | 数据集 | 模型 | 损失 |
 |------|--------|------|------|

@@ -42,7 +42,7 @@ import hashlib
 import json
 import math
 import subprocess
-from dataclasses import dataclass, asdict, field, replace
+from dataclasses import dataclass, asdict, field, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -591,6 +591,23 @@ class FrozenConfig:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(payload, f, indent=2, default=str)
+
+    @classmethod
+    def load(cls, path: Path) -> "FrozenConfig":
+        """
+        Inverse of save(): the one place that knows this artifact's on-disk
+        field layout, so callers (e.g. experiment.py's --mode traditional,
+        精简与config管理.md Phase D) never need their own ad hoc
+        field-by-field parsing of a frozen/candidate config file.
+        """
+        with open(path, "r") as f:
+            payload = json.load(f)
+        payload.pop("config_hash", None)  # save()'s only non-field addition.
+        valid_fields = {field_.name for field_ in fields(cls)}
+        unknown = set(payload) - valid_fields
+        if unknown:
+            raise ValueError(f"Unknown FrozenConfig field(s) in {path}: {sorted(unknown)}")
+        return cls(**payload)
 
 
 def validate_frozen_config(train_params: Dict[str, Any]) -> None:
