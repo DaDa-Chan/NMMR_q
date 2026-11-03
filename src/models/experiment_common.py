@@ -439,6 +439,42 @@ def finite_valued_trials(study) -> List[Any]:
     return [t for t in completed if t.value is not None and math.isfinite(t.value)]
 
 
+class NoFiniteRound1TrialError(RuntimeError):
+    """
+    Every Round 1 trial for this study was non-finite (+inf from a
+    pre-specified failure condition) or never reached Optuna's COMPLETE
+    state. 精简与config管理.md Phase A item 1/2: this must be raised BEFORE
+    one-SE/top-k selection ever runs -- not after the caller has already
+    printed a "best params"/"selected trial" line that only looks
+    meaningful (score=inf is not meaningful), and must never be mistaken
+    for a Round 2 or unrelated failure.
+    """
+
+
+class NoFiniteRound2CandidateError(RuntimeError):
+    """
+    Every Round 2 top-k candidate failed (value=inf) after multi-seed
+    re-evaluation. Distinct from NoFiniteRound1TrialError so
+    run_pilot_protocol.py can report round1_failed vs round2_failed
+    correctly instead of lumping every RuntimeError together.
+    """
+
+
+def summarize_trial_failure_reasons(trials) -> Dict[str, int]:
+    """
+    Count each distinct `failure_reason` user attr across `trials` (Optuna
+    Trial objects), falling back to the trial's own state name for a trial
+    that has no failure_reason recorded (e.g. it errored out entirely
+    before the per-fold try/except could set one). Used to report WHY a
+    Round 1 study had no finite trial, instead of just that it didn't.
+    """
+    reason_counts: Dict[str, int] = {}
+    for t in trials:
+        reason = t.user_attrs.get("failure_reason") or f"trial_state_{t.state.name}"
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return reason_counts
+
+
 def select_top_k_candidates(study, k: int = 5) -> List[Any]:
     """
     Plan hpo_selection_plan.md section 6.5: rank Round 1's FINITE-valued

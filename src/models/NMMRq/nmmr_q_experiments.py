@@ -28,6 +28,9 @@ from src.models.experiment_common import (
     select_one_se_candidate,
     fold_control_seeds,
     build_fold_record,
+    finite_valued_trials,
+    summarize_trial_failure_reasons,
+    NoFiniteRound1TrialError,
 )
 from src.utils import get_device, empty_device_cache, set_random_seed, make_seed_bundle
 
@@ -347,6 +350,19 @@ def _run_optuna_tuning(
     study.optimize(objective, n_trials=n_trials)
 
     print(f"\n[Optuna] 调优完成。")
+    # 精简与config管理.md Phase A item 1/2: 在选择最佳 trial 之前先检查是否
+    # 存在任何有限值 trial -- 否则下面的 one-SE 选择会在一个 value=inf 的
+    # trial 上"成功"跑完,打印出看起来正常但毫无意义的"最佳参数"。
+    if not finite_valued_trials(study):
+        reason_counts = summarize_trial_failure_reasons(study.trials)
+        print(f"[Optuna] Round 1: 全部 {len(study.trials)} 个 trial 失败"
+              f"(非有限值/未完成),不选择任何参数,不进入 Round 2。失败原因统计:")
+        for reason, count in sorted(reason_counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {reason}: {count}")
+        raise NoFiniteRound1TrialError(
+            f"Round 1 produced no finite-valued trial out of {len(study.trials)} total."
+        )
+
     # Plan 5.7: the one-SE rule, not the pure minimum, is the primary selection
     # rule; the pure-minimum trial is kept only as audit info alongside it.
     selected_trial, best_trial = select_one_se_candidate(study)

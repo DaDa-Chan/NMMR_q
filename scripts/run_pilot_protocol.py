@@ -133,7 +133,13 @@ def main():
           f"frozen config IFF confirm passed, for {method_ids} ===")
 
     pipeline_results = {}
+    # 精简与config管理.md Phase A item 2: Round 1 and Round 2 total failure
+    # are DISTINCT, named exception types -- never both reported as the same
+    # generic "Round 1 failed". Any OTHER exception is not caught here at
+    # all: it propagates with its own type and message instead of being
+    # relabeled as a Round 1 failure.
     round1_failed_methods = []
+    round2_failed_methods = []
     for method_id in method_ids:
         data_configs, train_params = _load_method_config(method_id)
         base_params, search_space = _parse_optuna_space(copy.deepcopy(train_params))
@@ -158,13 +164,16 @@ def main():
                 scenario=args.scenario, storage_dir=results_dir,
                 pilot_select_sha256=pilot.select_sha256,
             )
-        except RuntimeError as e:
-            # Round 1 produced no finite-valued trial (pilot HPO fix round 2
-            # item 4): no provisional candidate exists at all for this
-            # method, so there is nothing for save_pipeline_artifacts to
-            # write. Skip it and keep going with the other requested methods.
-            print(f"[{method_id}] Round 1 failed entirely, skipping this method: {e}")
+        except hp.NoFiniteRound1TrialError as e:
+            # No provisional candidate exists at all for this method, so
+            # there is nothing for save_pipeline_artifacts to write. Skip
+            # it and keep going with the other requested methods.
+            print(f"[{method_id}] round1_failed: {e}")
             round1_failed_methods.append(method_id)
+            continue
+        except hp.NoFiniteRound2CandidateError as e:
+            print(f"[{method_id}] round2_failed: {e}")
+            round2_failed_methods.append(method_id)
             continue
         pipeline_results[method_id] = result
 
@@ -182,7 +191,9 @@ def main():
             f"mean_moment_risk={report.get('mean_moment_risk')}"
         )
     for method_id in round1_failed_methods:
-        print(f"{method_id}: status=round1_failed (all trials non-finite; no frozen/provisional config)")
+        print(f"{method_id}: status=round1_failed (no finite Round 1 trial; no candidate at all)")
+    for method_id in round2_failed_methods:
+        print(f"{method_id}: status=round2_failed (no finite Round 2 candidate; no candidate at all)")
 
     print(f"\nAll artifacts written to {data_dir}, {config_dir}, {results_dir}")
 

@@ -49,8 +49,9 @@ from src.models.experiment_common import (
     fold_score_dispersion,
     pick_simplest_within_one_se,
     select_top_k_candidates,
-    finite_valued_trials,
     build_fold_record,
+    NoFiniteRound1TrialError,
+    NoFiniteRound2CandidateError,
 )
 from src.utils import get_device, make_seed_bundle, set_random_seed
 
@@ -467,7 +468,14 @@ class FrozenConfig:
     split_seed: Optional[int] = None
     tuning_seed: Optional[int] = None
     optuna_sampler: str = "TPESampler"
-    round1_n_trials: Optional[int] = None
+    # 精简与config管理.md Phase A item 4: these two are distinct and neither
+    # should be guessed from the other -- "additional" is just what THIS
+    # invocation asked _run_optuna_tuning to run; "total" is how many trials
+    # the persisted study actually holds afterward (0 extra on top of
+    # whatever was already there when storage_dir is given, or simply
+    # equal to "additional" for an ephemeral in-memory study).
+    round1_additional_trials: Optional[int] = None
+    round1_total_trials: Optional[int] = None
     round1_top_k: Optional[int] = None
     round2_init_seeds: List[int] = field(default_factory=list)
     software_version: str = field(default_factory=_get_git_commit)
@@ -798,22 +806,40 @@ def _search_space_sha256(search_space: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(search_space, sort_keys=True, default=str).encode()).hexdigest()
 
 
+# Fixed description of Round 1's held-out scoring rule (plan 5.4:
+# _compute_unified_q_score/_compute_unified_h_score, always V-statistic
+# moment risk regardless of this method's own training objective). Bump
+# this string if that scoring rule itself ever changes, so an old study
+# computed under the previous rule is never silently extended under a new
+# one (精简与config管理.md section 6.1).
+ROUND1_SCORING_RULE = "unified_v_statistic_moment_risk_v1"
+
+
 def _prepare_persistent_study(
     storage: str,
     study_name: str,
     method_id: str,
     pilot_select_sha256: Optional[str],
     search_space: Dict[str, Any],
+    n_splits: Optional[int] = None,
+    n_epochs: Optional[Any] = None,
+    patience: Optional[Any] = None,
+    early_stopping_min_delta: Optional[Any] = None,
+    split_seed: Optional[int] = None,
 ) -> int:
     """
-    Pilot HPO fix (round 2) item 6: the FIRST time a study is created at
-    (storage, study_name), record its identity (method_id, pilot-select
-    file SHA-256, search-space SHA-256) as study system attrs. Every later
-    call that resumes the same (storage, study_name) must match all three,
-    or this raises -- refusing to let a different method/pilot-data/
-    search-space accidentally append trials into someone else's study. On
-    mismatch, nothing is deleted or overwritten; the caller must use a new
-    `--results_dir`.
+    Pilot HPO fix (round 2) item 6 / 精简与config管理.md Phase A item 3: the
+    FIRST time a study is created at (storage, study_name), record its full
+    identity -- method_id, pilot-select file SHA-256, search-space
+    SHA-256, plus every training/scoring setting that changes whether
+    trials are even comparable (n_splits, n_epochs, patience,
+    early_stopping_min_delta, split_seed, and the Round 1 scoring rule) --
+    as study user attrs. Every later call that resumes the same (storage,
+    study_name) must match ALL of these, or this raises -- refusing to let
+    a different method/pilot-data/search-space/training-setting (e.g. a
+    15-epoch smoke run vs. a 300-epoch formal run) accidentally append
+    trials into the same study. On mismatch, nothing is deleted or
+    overwritten; the caller must use a new `--results_dir`.
 
     Also returns the trial count already stored (0 for a brand new study),
     for the "Existing trials / Additional trials requested / Expected
@@ -825,6 +851,12 @@ def _prepare_persistent_study(
         "method_id": method_id,
         "pilot_select_sha256": pilot_select_sha256,
         "search_space_sha256": _search_space_sha256(search_space),
+        "n_splits": n_splits,
+        "n_epochs": n_epochs,
+        "patience": patience,
+        "early_stopping_min_delta": early_stopping_min_delta,
+        "split_seed": split_seed,
+        "round1_scoring_rule": ROUND1_SCORING_RULE,
     }
     study = optuna.create_study(storage=storage, study_name=study_name, load_if_exists=True)
     # user_attrs (not system_attrs, deprecated since Optuna 3.1 and removed
@@ -927,12 +959,21 @@ def run_hpo_study_for_method(
         existing_trial_count = _prepare_persistent_study(
             storage=storage, study_name=study_name, method_id=method_id,
             pilot_select_sha256=pilot_select_sha256, search_space=search_space,
+            n_splits=n_splits, n_epochs=base_train_params.get("n_epochs"),
+            patience=base_train_params.get("patience"),
+            early_stopping_min_delta=base_train_params.get("early_stopping_min_delta"),
+            split_seed=seeds.split_seed,
         )
     print(f"[{method_id}] Existing trials: {existing_trial_count}")
     print(f"[{method_id}] Additional trials requested: {n_trials}")
     print(f"[{method_id}] Expected total after this run: {existing_trial_count + n_trials}")
 
     # --- Round 1: Optuna TPE screening ---
+    # 精简与config管理.md Phase A item 1/2: the "every trial is non-finite"
+    # check itself now lives INSIDE _run_optuna_tuning, raising
+    # NoFiniteRound1TrialError BEFORE it ever prints a misleading "best
+    # params" line for a value=inf trial. Nothing left to check here except
+    # the degenerate "no search space at all" case (study is None).
     _r1_best_params, study, _r1_selected, _r1_best = runner(
         data_name="sgd",
         dataset=pilot_select_dataset,
@@ -947,29 +988,11 @@ def run_hpo_study_for_method(
         storage=storage,
         study_name=study_name,
     )
-    round1_table = build_trial_table(study, method_id=method_id) if study is not None else pd.DataFrame()
-
-    # Pilot HPO fix (round 2) item 4: inf/NaN/non-COMPLETE trials never
-    # participate in ranking. Partial success selects only from the finite
-    # ones; total failure stops here -- before Round 2, pilot-confirm, or
-    # any frozen config.
-    all_trials = study.trials if study is not None else []
-    has_finite_trial = study is not None and bool(finite_valued_trials(study))
-    if not has_finite_trial:
-        reason_counts: Dict[str, int] = {}
-        for t in all_trials:
-            reason = t.user_attrs.get("failure_reason") or f"trial_state_{t.state.name}"
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        print(f"[{method_id}] Round 1: ALL {len(all_trials)} trial(s) failed (non-finite or "
-              f"non-complete); stopping before Round 2 / pilot-confirm / frozen config. "
-              f"Failure reason counts:")
-        for reason, count in sorted(reason_counts.items(), key=lambda kv: -kv[1]):
-            print(f"  {reason}: {count}")
-        raise RuntimeError(
-            f"{method_id}: Round 1 produced no finite-valued trial out of {len(all_trials)}; "
-            f"see the failure-reason breakdown printed above. Not proceeding to Round 2."
+    if study is None:
+        raise NoFiniteRound1TrialError(
+            f"{method_id}: Round 1 did not run (empty search space); nothing to select."
         )
-
+    round1_table = build_trial_table(study, method_id=method_id)
     top_k_trials = select_top_k_candidates(study, k=top_k)
 
     # --- Round 2: multi-seed re-evaluation of the top_k finalists ---
@@ -1004,7 +1027,7 @@ def run_hpo_study_for_method(
 
     selected, pure_min = pick_simplest_within_one_se(round2_candidates)
     if not math.isfinite(selected["value"]):
-        raise RuntimeError(
+        raise NoFiniteRound2CandidateError(
             f"{method_id}: every Round 2 top_k candidate failed (value=inf) -- "
             "no usable candidate survived multi-seed re-evaluation. Check the "
             "data/config (pilot sample too small? thresholds too strict?) and "
@@ -1031,7 +1054,8 @@ def run_hpo_study_for_method(
         pilot_select_data_seed=pilot_select_data_seed,
         split_seed=seeds.split_seed,
         tuning_seed=seeds.tuning_seed,
-        round1_n_trials=n_trials,
+        round1_additional_trials=n_trials,
+        round1_total_trials=existing_trial_count + n_trials,
         round1_top_k=top_k,
         round2_init_seeds=list(round2_init_seeds),
         selected_round1_trial_number=selected["round1_trial_number"],
