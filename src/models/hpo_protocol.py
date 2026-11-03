@@ -511,6 +511,12 @@ class FrozenConfig:
     hpo_scoring_objective: str = "held-out V-statistic moment risk (plan 5.4 / hpo_selection_plan 6.3-6.4)"
     kernel_rule: str = "median heuristic, frozen per fold from gradient_train only (plan 3.4/5.3)"
     kernel_bandwidth_multiplier: Optional[float] = None
+    # Q only (None for H): the same hard threshold Round 1/2 already
+    # screened every candidate's predictions against (pilot HPO fix
+    # request item 3). pilot-confirm's decide_pilot_confirm() checks the
+    # final OOF Q predictions against this SAME value -- not a separately
+    # tunable "confirm threshold" (精简与config管理.md section 6.5 item 5).
+    q_hard_threshold: Optional[float] = None
     n_splits: Optional[int] = None
     max_epochs: Optional[int] = None
     patience: Optional[int] = None
@@ -612,71 +618,47 @@ def validate_frozen_config(train_params: Dict[str, Any]) -> None:
         raise ValueError("Frozen config must not contain 'hpo_n_trials' (an HPO-only key).")
 
 
-@dataclass(frozen=True)
-class ConfirmThresholds:
+def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Fixed BEFORE any pilot-confirm run (pilot HPO fix request item 6 /
-    hpo_selection_plan.md section 9: "阈值必须来自预先固定的配置,不得根据
-    confirm 结果临时调整"). Changing one of these for a specific method/run
-    after seeing its confirm report defeats the entire point of
-    pilot-confirm as an independent check -- if a threshold genuinely needs
-    to change, that is a decision to log and re-run the whole protocol
-    from Round 1 with a new DEFAULT_CONFIRM_THRESHOLDS, not to patch here.
-    """
-    max_frac_folds_capped_at_max_epochs: float = 0.5
-    max_per_fold_train_seconds: float = 1800.0
-    max_total_train_seconds: float = 7200.0
-    max_q_prop_gt100: float = 0.05
-
-
-DEFAULT_CONFIRM_THRESHOLDS = ConfirmThresholds()
-
-
-def decide_pilot_confirm(
-    report: Dict[str, Any],
-    thresholds: ConfirmThresholds = DEFAULT_CONFIRM_THRESHOLDS,
-) -> Dict[str, Any]:
-    """
-    Explicit pilot-confirm pass/fail judgment (pilot HPO fix request item
-    6): checks moment risk finiteness, best-checkpoint restoration on every
-    fold, per-fold/total training time, how often training was still
-    capped at max_epochs, and (Q only) the q>100 proportion -- all against
-    `thresholds`, fixed ahead of time. Returns
-    {"status": "passed"|"failed", "failure_reasons": [...], "thresholds": {...}}.
-    Only a "passed" status may ever produce a frozen config.
+    Explicit pilot-confirm pass/fail judgment (精简与config管理.md section
+    6.5): a FIXED checklist of hard failure conditions, none of them
+    hardware/runtime-budget related --
+      1. every fold completed with a valid best checkpoint;
+      2. the ATE estimate (and every per-fold ATE) is finite;
+      3. held-out moment risk is finite;
+      4. the H/Q predictions contain no NaN/Inf;
+      5. (Q only) no prediction exceeds this method's pre-specified
+         `q_hard_threshold` (the SAME one Round 1/2 already screened
+         candidates against -- see FrozenConfig.q_hard_threshold).
+    Per-fold/total training time, how often training hit max_epochs, and
+    Q's extreme-value proportions remain in the report as diagnostics the
+    reader should look at, but none of them gates pass/fail any more (plan:
+    "不把硬件速度、每 epoch 耗时等运维信息作为统计方法的通过门槛"). Returns
+    {"status": "passed"|"failed", "failure_reasons": [...]}. Only a
+    "passed" status may ever produce a confirmed candidate.
     """
     reasons: List[str] = []
 
     if "exception" in report:
         reasons.append(f"pilot_confirm_exception: {report['exception']}")
-        return {"status": "failed", "failure_reasons": reasons, "thresholds": asdict(thresholds)}
+        return {"status": "failed", "failure_reasons": reasons}
 
-    if not report.get("moment_risk_all_finite", False):
-        reasons.append("moment_risk_not_all_finite")
     if not report.get("all_folds_restored_best_checkpoint", False):
         reasons.append("not_all_folds_restored_best_checkpoint")
+    if not report.get("ate_all_finite", False):
+        reasons.append("ate_not_finite")
+    if not report.get("moment_risk_all_finite", False):
+        reasons.append("moment_risk_not_all_finite")
+    if not report.get("predictions_all_finite", False):
+        reasons.append("predictions_not_finite")
 
-    fold_diagnostics = report.get("fold_diagnostics", [])
-    for d in fold_diagnostics:
-        if d.get("train_seconds", 0.0) > thresholds.max_per_fold_train_seconds:
-            reasons.append(f"fold_{d.get('fold')}_train_seconds_exceeds_threshold")
-
-    total_seconds = report.get("total_train_seconds", 0.0)
-    if total_seconds > thresholds.max_total_train_seconds:
-        reasons.append("total_train_seconds_exceeds_threshold")
-
-    if fold_diagnostics:
-        n_capped = sum(1 for d in fold_diagnostics if d.get("stop_reason") == "max_epochs")
-        if (n_capped / len(fold_diagnostics)) > thresholds.max_frac_folds_capped_at_max_epochs:
-            reasons.append("too_many_folds_hit_max_epochs")
-
-    for level in (0, 1):
-        key = f"q_a{level}_prop_gt100"
-        if key in report and report[key] > thresholds.max_q_prop_gt100:
-            reasons.append(f"{key}_exceeds_threshold")
+    q_hard_threshold = report.get("q_hard_threshold")
+    q_max_abs = report.get("q_max_abs")
+    if q_hard_threshold is not None and q_max_abs is not None and q_max_abs > q_hard_threshold:
+        reasons.append(f"q_exceeds_hard_threshold(max_q={q_max_abs:.2f})")
 
     status = "passed" if not reasons else "failed"
-    return {"status": status, "failure_reasons": reasons, "thresholds": asdict(thresholds)}
+    return {"status": status, "failure_reasons": reasons}
 
 
 def build_trial_table(study, method_id: Optional[str] = None) -> pd.DataFrame:
@@ -1103,6 +1085,11 @@ def run_hpo_study_for_method(
         )
     final_params = selected["_params"]
 
+    q_hard_threshold = None
+    if model_kind == "Q":
+        from src.models.NMMRq.nmmr_q_experiments import DEFAULT_Q_HARD_THRESHOLD
+        q_hard_threshold = final_params.get("q_hard_threshold", DEFAULT_Q_HARD_THRESHOLD)
+
     frozen = FrozenConfig(
         method_id=method_id,
         network_depth=final_params.get("network_depth"),
@@ -1112,6 +1099,7 @@ def run_hpo_study_for_method(
         batch_size=final_params.get("batch_size"),
         training_objective=stat_kind,
         kernel_bandwidth_multiplier=final_params.get("kernel_bandwidth_multiplier", 1.0),
+        q_hard_threshold=q_hard_threshold,
         n_splits=n_splits,
         max_epochs=final_params.get("n_epochs"),
         patience=final_params.get("patience"),
@@ -1155,7 +1143,6 @@ def run_and_confirm_method(
     round2_init_seeds: Tuple[int, ...] = DEFAULT_ROUND2_INIT_SEEDS,
     scenario: Optional[int] = None,
     storage_dir: Optional[Path] = None,
-    thresholds: ConfirmThresholds = DEFAULT_CONFIRM_THRESHOLDS,
     pilot_select_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -1192,7 +1179,7 @@ def run_and_confirm_method(
     except Exception as e:
         report = {"method_id": method_id, "exception": str(e)}
 
-    decision = decide_pilot_confirm(report, thresholds)
+    decision = decide_pilot_confirm(report)
     frozen = replace(
         provisional,
         status="confirmed" if decision["status"] == "passed" else "failed",
@@ -1283,13 +1270,20 @@ def evaluate_pilot_confirm(
     this function itself makes no pass/fail judgment (plan: "pilot-confirm
     只有两种结论...不能静默挑第二名或反复查看 confirm 数据").
 
-    Reports (plan 6.1 / hpo_selection_plan.md section 9):
-    - point estimate and per-fold estimates;
+    Reports (plan 6.1 / hpo_selection_plan.md section 9, plus the fixed
+    hard-failure fields 精简与config管理.md section 6.5 needs --
+    `ate_all_finite`/`predictions_all_finite`/(Q only)`q_max_abs`+
+    `q_hard_threshold` -- decide_pilot_confirm() reads from this report):
+    - point estimate and per-fold estimates, and whether all of them are
+      finite;
     - per-fold held-out moment risk (same unified V-statistic scorer HPO
       uses) plus a sample-size-weighted mean across folds, and whether
       every fold actually restored a valid best checkpoint;
-    - per-fold training time;
-    - (Q only) extreme-value diagnostics on the final OOF q predictions;
+    - per-fold training time (a diagnostic/time-table figure only -- it no
+      longer gates pass/fail);
+    - whether the final OOF H/Q predictions contain any NaN/Inf, and (Q
+      only) extreme-value diagnostics plus the max |prediction| compared
+      against this method's own `q_hard_threshold`;
     - (scenario 1 only -- the only DGP this repo has a verified closed-form
       true bridge for, see _true_h0_scenario1/_true_q0_scenario1) the true
       bridge MSE, reported for diagnosis ONLY, never used to reselect
@@ -1312,12 +1306,16 @@ def evaluate_pilot_confirm(
             "method_id": frozen_config.method_id,
             "ate_estimate": ate_estimate.item(),
             "per_fold_ate": ate_values,
+            "ate_all_finite": bool(math.isfinite(ate_estimate.item()) and all(math.isfinite(v) for v in ate_values)),
             "n_folds": frozen_config.n_splits,
             "fold_diagnostics": fold_diagnostics,
             **_summarize_fold_diagnostics(fold_diagnostics),
         }
         a_labels = pilot_confirm_dataset.A.cpu().numpy().reshape(-1)
         q_flat = q_preds.reshape(-1)
+        report["predictions_all_finite"] = bool(np.isfinite(q_flat).all())
+        report["q_max_abs"] = float(np.max(np.abs(q_flat))) if q_flat.size else None
+        report["q_hard_threshold"] = frozen_config.q_hard_threshold
         for level, mask_val in ((0, 0.0), (1, 1.0)):
             mask = a_labels == mask_val
             q_level = q_flat[mask]
@@ -1350,10 +1348,16 @@ def evaluate_pilot_confirm(
             "method_id": frozen_config.method_id,
             "ate_estimate": ate_estimate.item(),
             "per_fold_ate": ate_values,
+            "ate_all_finite": bool(math.isfinite(ate_estimate.item()) and all(math.isfinite(v) for v in ate_values)),
             "n_folds": frozen_config.n_splits,
             "fold_diagnostics": fold_diagnostics,
             **_summarize_fold_diagnostics(fold_diagnostics),
         }
+        report["predictions_all_finite"] = bool(
+            np.isfinite(h_preds["h_fact"]).all()
+            and np.isfinite(h_preds["h_1"]).all()
+            and np.isfinite(h_preds["h_0"]).all()
+        )
         if scenario == 1:
             a_labels = pilot_confirm_dataset.A.cpu().numpy().reshape(-1)
             true_h = _true_h0_scenario1(

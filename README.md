@@ -215,7 +215,15 @@ Round 2 选中的唯一 candidate 会在从未参与 HPO 的 pilot-confirm 上�
 - Q 的分位数及极端值比例；
 - scenario 1 下的真 H/Q 桥 MSE（仅用于诊断）。
 
-当前代码还将时间、跑满 epoch 比例和 Q>100 比例用作 confirm 硬门槛；这些项后续将精简为诊断输出而非通过条件。在修改前，阅读 confirm 失败原因时需要注意。
+判断 passed/failed 只看固定的硬性检查清单，不受硬件速度影响：
+
+1. 每一折都正常完成并恢复了最佳 checkpoint；
+2. ATE 估计（以及每一折的 ATE）是有限值；
+3. held-out moment risk 是有限值；
+4. H/Q 的最终预测里没有 NaN/Inf；
+5.（仅 Q）预测值没有超过该方法自己在 Round 1/2 筛选时就用的同一个 `q_hard_threshold`。
+
+每折/总训练时间、是否跑满 epoch、Q 的极端值比例仍然会出现在 confirm 报告里，但只作为诊断信息，不再决定 passed/failed。
 
 ### 4. 命令示例
 
