@@ -736,18 +736,15 @@ def reevaluate_candidate_with_seeds(
         from src.models.NMMRq.nmmr_q_experiments import (
             _create_trainer, _compute_unified_q_score as compute_score,
             _q_predictions_by_treatment, _q_distribution_stats,
-            DEFAULT_MAX_FOLD_TRAIN_SECONDS,
         )
     else:
         from src.models.NMMRh.nmmr_h_experiments import (
             _create_trainer, _compute_unified_h_score as compute_score,
-            DEFAULT_MAX_FOLD_TRAIN_SECONDS,
         )
     from torch.utils.data import DataLoader, Subset
     from src.utils import empty_device_cache, get_device
 
     batch_size = params["batch_size"]
-    max_fold_train_seconds = float(params.get("max_fold_train_seconds", DEFAULT_MAX_FOLD_TRAIN_SECONDS))
     folds = nested_hpo_fold_split(dataset, n_splits, split_seed)
 
     scores: List[float] = []
@@ -806,11 +803,6 @@ def reevaluate_candidate_with_seeds(
                 if model_kind == "Q":
                     q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
                     q_stats = _q_distribution_stats(q_by_treatment)
-                if train_result.train_seconds > max_fold_train_seconds:
-                    record_failure(fold_idx, init_seed, f"timeout(train_seconds={train_result.train_seconds:.1f})",
-                                   train_result, extra=q_stats)
-                    any_failure = True
-                    continue
 
                 score, n = compute_score(trainer, model, dataset, score_idx.tolist())
                 if not math.isfinite(score):

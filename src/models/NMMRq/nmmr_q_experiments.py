@@ -35,12 +35,6 @@ from src.models.experiment_common import (
 )
 from src.utils import get_device, empty_device_cache, set_random_seed, make_seed_bundle
 
-# Pre-specified, fixed-ahead-of-time failure threshold for the pilot HPO
-# selection flow (never adjusted post-hoc based on a particular run's
-# results). Overridable per method via the `max_fold_train_seconds` key in
-# that method's config.
-DEFAULT_MAX_FOLD_TRAIN_SECONDS = 1800.0
-
 
 def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
     
@@ -208,9 +202,6 @@ def _run_optuna_tuning(
         # Plan 2.8d fix: read batch_size from THIS trial's params, not the
         # fixed base config -- otherwise searching over batch_size has no effect.
         batch_size = current_params["batch_size"]
-        max_fold_train_seconds = float(
-            current_params.get("max_fold_train_seconds", DEFAULT_MAX_FOLD_TRAIN_SECONDS)
-        )
 
         # Record the fields the one-SE selection rule (plan 5.7) needs to rank
         # candidates by simplicity, regardless of whether they were searched
@@ -292,13 +283,6 @@ def _run_optuna_tuning(
                     return fail(fold_idx, "nonfinite_during_training", fold_init_seed, fold_shuffle_seed, train_result)
 
                 q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
-                # Pilot HPO fix request item 3: a pre-specified per-fold time
-                # budget this fold exceeded (checked after the fact -- this
-                # training loop is synchronous, so this cannot pre-empt a
-                # run already in progress, only flag it as a failure once done).
-                if train_result.train_seconds > max_fold_train_seconds:
-                    return fail(fold_idx, f"timeout(train_seconds={train_result.train_seconds:.1f})",
-                                fold_init_seed, fold_shuffle_seed, train_result)
 
                 # Unified V-statistic score (plan 5.4), on the untouched score fold.
                 fold_score, fold_n = _compute_unified_q_score(

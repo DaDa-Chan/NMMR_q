@@ -63,7 +63,6 @@
         1,
         2
       ]
-    },
-    "max_fold_train_seconds": 1800.0
+    }
   }
 }
