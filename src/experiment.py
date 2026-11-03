@@ -15,6 +15,7 @@ if str(project_root) not in sys.path:
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment, train_q_standalone
 from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment, train_h_standalone
 from src.models.LINEAR.linear_model import LINEAR_experiment
+from src.models.experiment_common import _parse_optuna_space
 from src.utils import set_random_seed, make_seed_bundle
 
 
@@ -22,14 +23,21 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
     """
     加载并合并配置文件。
     它从 JSON 文件中提取特定数据集的数据配置和通用的训练参数。
+
+    This entrypoint only runs fixed-parameter training/evaluation (pilot HPO
+    fix request item 8): hyperparameter search happens exclusively in
+    scripts/run_pilot_protocol.py and ends in a frozen config. If the given
+    config still has an Optuna search space (e.g. the un-tuned
+    configs/sgd/nmmr_q/nmmr_q_u_sgd.json rather than a frozen config), this
+    raises immediately instead of silently launching HPO inline.
     """
     config_path = Path(config_path_str)
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件未找到: {config_path}")
-        
+
     with open(config_path, 'r') as f:
         config_json = json.load(f)
-    
+
     # 加载特定数据集的配置
     if dataset_name not in config_json['data_configs']:
         raise KeyError(f"在 {config_path} 中未找到数据集 '{dataset_name}' 的配置。")
@@ -40,7 +48,14 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
         train_params = {}
     else:
         train_params = config_json['train_params']
-    
+
+    _, search_space = _parse_optuna_space(train_params)
+    if search_space:
+        raise ValueError(
+            f"{config_path} still has an Optuna search space for {list(search_space)}. "
+            "Run scripts/run_pilot_protocol.py first and provide a frozen config."
+        )
+
     return data_configs, train_params
 
 

@@ -9,36 +9,61 @@
   "train_params": {
     "model_name": "nmmr_h",
     "loss_name": "U_statistic",
-    "n_epochs": 150,
-    "batch_size": 500,
+    "n_epochs": 300,
+    "batch_size": {
+      "type": "categorical",
+      "choices": [
+        256,
+        500,
+        1000
+      ]
+    },
     "patience": 30,
-    "scheduler_patience": 15,
+    "scheduler_patience": 10,
     "scheduler_factor": 0.5,
     "n_splits": 5,
     "log_metrics": true,
-    "network_depth": 4,
+    "network_depth": {
+      "type": "categorical",
+      "choices": [
+        2,
+        3,
+        4,
+        5
+      ]
+    },
     "use_u_statistic": true,
-    "kernel_gamma": 1.0,
     "hpo_n_trials": 10,
     "learning_rate": {
       "type": "float",
-      "low": 0.0008,
-      "high": 0.002,
+      "low": 0.0001,
+      "high": 0.005,
       "log": true
     },
     "network_width": {
       "type": "categorical",
       "choices": [
-        45,
-        50,
-        55
+        32,
+        64,
+        128
       ]
     },
     "l2_penalty": {
       "type": "float",
-      "low": 1e-06,
-      "high": 5e-06,
+      "low": 1e-07,
+      "high": 0.001,
       "log": true
-    }
+    },
+    "early_stopping_min_delta": 1e-05,
+    "scheduler_min_lr": 1e-06,
+    "kernel_bandwidth_multiplier": {
+      "type": "categorical",
+      "choices": [
+        0.5,
+        1,
+        2
+      ]
+    },
+    "max_fold_train_seconds": 1800.0
   }
 }

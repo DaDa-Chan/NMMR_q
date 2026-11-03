@@ -9,6 +9,8 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.utils import make_seed_bundle
+
 
 def to_bool(value: Any, default: bool = False) -> bool:
     """
@@ -292,23 +294,118 @@ def insufficient_treatment_groups_reason(
     return None
 
 
+def fold_control_seeds(study_seed: int, fold_idx: int) -> Tuple[int, int]:
+    """
+    Round 1 Optuna trials (hpo_selection_plan.md section 6 / pilot HPO fix
+    request item 2): every trial evaluated on the same fold must use the
+    SAME model-initialization seed and the SAME DataLoader shuffle seed,
+    derived only from (study_seed, fold_idx) -- never trial.number -- so a
+    trial's score differs because of its hyperparameters, not because of a
+    different random draw.
+
+    Returns two INDEPENDENT seeds (not one reused for both roles) because
+    model init consumes a variable amount of global RNG state depending on
+    network_depth/network_width; if the shuffle order were taken from
+    whatever global RNG state is left after init, a deeper network's
+    initialization would silently shift the DataLoader's shuffle order even
+    though fold_idx (and thus the intended shuffle seed) is the same.
+    """
+    bundle = make_seed_bundle(study_seed, fold_idx)
+    return bundle.init_seed, bundle.data_seed
+
+
+def build_fold_record(
+    fold_idx: int,
+    init_seed: Optional[int],
+    shuffle_seed: Optional[int],
+    params: Dict[str, Any],
+    score: float,
+    train_result: Optional[TrainResult],
+    failure_reason: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    One row of the Round 1 / Round 2 HPO record (pilot HPO fix request item
+    7: "补齐调参记录"). `train_result` is None when the fold failed before
+    training produced any result (e.g. insufficient treatment groups).
+    """
+    record: Dict[str, Any] = {
+        "fold_id": fold_idx,
+        "init_seed": init_seed,
+        "shuffle_seed": shuffle_seed,
+        **{f"param.{k}": v for k, v in params.items()},
+        "score": score,
+        "failure_reason": failure_reason,
+    }
+    if train_result is not None:
+        record.update({
+            "best_epoch": train_result.best_epoch,
+            "best_val_score": train_result.best_val_score,
+            "last_epoch": train_result.last_epoch,
+            "stopped_early": train_result.stopped_early,
+            "stop_reason": train_result.stop_reason,
+            "best_state_restored": train_result.best_state_restored,
+            "n_lr_reductions": train_result.n_lr_reductions,
+            "final_learning_rate": train_result.final_learning_rate,
+            "kernel_bandwidth": train_result.kernel_bandwidth,
+            "train_seconds": train_result.train_seconds,
+            "n_nonfinite_train": train_result.n_nonfinite_train,
+            "n_nonfinite_val": train_result.n_nonfinite_val,
+        })
+    if extra:
+        record.update(extra)
+    return record
+
+
+def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Generic one-standard-error selection rule (plan section 5.7 /
+    hpo_selection_plan.md section 8), over a plain list of candidate dicts
+    (not tied to Optuna) each carrying at least: `value`, `fold_se`,
+    `network_depth`, `network_width`, `l2_penalty`, `total_train_seconds`.
+
+    Rule:
+      1. lambda_min = the candidate with the lowest (best) `value`.
+      2. SE_min = lambda_min's `fold_se`.
+      3. Among candidates with `value` <= lambda_min["value"] + SE_min, pick
+         the "simplest": shallower network -> narrower network -> stronger
+         L2 (larger l2_penalty) -> shorter total training time as the final
+         tie-break.
+
+    Returns (selected, best): `best` is the pure-minimum candidate, kept for
+    audit per the plan ("同时报告纯最小值规则的选择作为审计信息").
+    """
+    if not candidates:
+        raise RuntimeError("No candidates to select from.")
+
+    best = min(candidates, key=lambda c: c["value"])
+    se_min = best.get("fold_se", 0.0) or 0.0
+    threshold = best["value"] + se_min
+
+    within_band = [c for c in candidates if c["value"] <= threshold]
+
+    def simplicity_key(c):
+        return (
+            c.get("network_depth", float("inf")),
+            c.get("network_width", float("inf")),
+            -(c.get("l2_penalty", 0.0) or 0.0),  # larger l2_penalty (stronger) sorts first
+            c.get("total_train_seconds", float("inf")),
+        )
+
+    selected = min(within_band, key=simplicity_key)
+    return selected, best
+
+
 def select_one_se_candidate(study):
     """
     Apply the one-standard-error candidate selection rule (plan section 5.7)
-    to a completed Optuna study.
+    to a completed Optuna study -- a thin Optuna-specific wrapper around
+    `pick_simplest_within_one_se`.
 
     Expects every COMPLETE trial to carry these user attrs (set by the
     objective() in nmmr_q_experiments.py / nmmr_h_experiments.py):
     `fold_se`, `network_depth`, `network_width`, `l2_penalty`,
     `total_train_seconds`.
-
-    Rule:
-      1. lambda_min = the trial with the lowest (best) score.
-      2. SE_min = lambda_min's cross-fold standard error (`fold_se`).
-      3. Among trials with score <= lambda_min.value + SE_min, pick the
-         "simplest": shallower network -> narrower network -> stronger L2
-         (larger l2_penalty) -> shorter total training time as the final
-         tie-break.
 
     Returns (selected_trial, best_trial): `best_trial` is the pure-minimum
     trial, kept for audit per the plan ("同时报告纯最小值规则的选择作为审计信息").
@@ -319,22 +416,38 @@ def select_one_se_candidate(study):
     if not completed:
         raise RuntimeError("No completed HPO trials to select a candidate from.")
 
-    best_trial = min(completed, key=lambda t: t.value)
-    se_min = best_trial.user_attrs.get("fold_se", 0.0) or 0.0
-    threshold = best_trial.value + se_min
+    by_number = {t.number: t for t in completed}
+    candidates = [
+        {"value": t.value, "_trial_number": t.number, **t.user_attrs}
+        for t in completed
+    ]
+    selected, best = pick_simplest_within_one_se(candidates)
+    return by_number[selected["_trial_number"]], by_number[best["_trial_number"]]
 
-    candidates = [t for t in completed if t.value <= threshold]
 
-    def simplicity_key(t):
-        return (
-            t.user_attrs.get("network_depth", float("inf")),
-            t.user_attrs.get("network_width", float("inf")),
-            -t.user_attrs.get("l2_penalty", 0.0),  # larger l2_penalty (stronger) sorts first
-            t.user_attrs.get("total_train_seconds", float("inf")),
-        )
+def finite_valued_trials(study) -> List[Any]:
+    """
+    Pilot HPO fix (round 2) item 4: `inf`/`NaN`/non-COMPLETE trials must
+    never participate in ranking -- a trial that returned +inf from a
+    pre-specified failure condition is still Optuna-COMPLETE, so filtering
+    on state alone is not enough.
+    """
+    import optuna
+    import math
 
-    selected_trial = min(candidates, key=simplicity_key)
-    return selected_trial, best_trial
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    return [t for t in completed if t.value is not None and math.isfinite(t.value)]
+
+
+def select_top_k_candidates(study, k: int = 5) -> List[Any]:
+    """
+    Plan hpo_selection_plan.md section 6.5: rank Round 1's FINITE-valued
+    completed trials (see finite_valued_trials) by raw mean held-out score
+    (no SE band at this stage -- that only applies to the final selection
+    in section 8) and keep the best `k` to carry into Round 2's multi-seed
+    re-evaluation.
+    """
+    return sorted(finite_valued_trials(study), key=lambda t: t.value)[:k]
 
 
 def _build_dataset_view(dataset, indices: List[int]):

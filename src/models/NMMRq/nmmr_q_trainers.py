@@ -222,17 +222,19 @@ class NMMR_Q_Trainer:
         if self.use_scheduler:
             sched_patience = self.train_params.get('scheduler_patience', 5)
             sched_factor = self.train_params.get('scheduler_factor', 0.5)
+            sched_min_lr = self.train_params.get('scheduler_min_lr', 1e-6)
             scheduler0 = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer0, mode='min', factor=sched_factor, patience=sched_patience, min_lr=1e-6
+                optimizer0, mode='min', factor=sched_factor, patience=sched_patience, min_lr=sched_min_lr
             )
             scheduler1 = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer1, mode='min', factor=sched_factor, patience=sched_patience, min_lr=1e-6
+                optimizer1, mode='min', factor=sched_factor, patience=sched_patience, min_lr=sched_min_lr
             )
 
         early_stopping = None
         if self.use_validation:
             patience = self.train_params.get('patience', 20)
-            early_stopping = EarlyStopping(patience=patience, min_delta=5e-5)
+            min_delta = self.train_params.get('early_stopping_min_delta', 5e-5)
+            early_stopping = EarlyStopping(patience=patience, min_delta=min_delta)
 
         n_nonfinite_train = 0
         n_nonfinite_val = 0

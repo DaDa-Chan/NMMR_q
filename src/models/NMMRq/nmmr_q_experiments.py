@@ -26,8 +26,17 @@ from src.models.experiment_common import (
     fold_score_dispersion,
     insufficient_treatment_groups_reason,
     select_one_se_candidate,
+    fold_control_seeds,
+    build_fold_record,
 )
 from src.utils import get_device, empty_device_cache, set_random_seed, make_seed_bundle
+
+# Pre-specified, fixed-ahead-of-time failure thresholds for the pilot HPO
+# selection flow (never adjusted post-hoc based on a particular run's
+# results). Overridable per method via the `q_hard_threshold` /
+# `max_fold_train_seconds` keys in that method's config.
+DEFAULT_Q_HARD_THRESHOLD = 1000.0
+DEFAULT_MAX_FOLD_TRAIN_SECONDS = 1800.0
 
 
 def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_name):
@@ -87,6 +96,53 @@ def _compute_unified_q_score(trainer,
     unified_score = 0.5 * score_total
     return float(unified_score.item()), len(indices)
 
+
+def _q_predictions_by_treatment(trainer, model, dataset, indices) -> Dict[int, np.ndarray]:
+    """
+    Raw q predictions on `indices`, split by the treatment level each
+    sample actually received (q0(Z,X) for A=0 rows, q1(Z,X) for A=1 rows).
+    Used for both the hard-threshold failure check (pilot HPO fix request
+    item 3) and the Round 1/Round 2 record's per-treatment-group
+    distribution stats (item 7) -- one forward pass serves both.
+    """
+    view = _build_dataset_view(dataset, indices)
+    with torch.no_grad():
+        A = view.A.to(trainer.device)
+        Z = view.Z.to(trainer.device)
+        X = view.X.to(trainer.device)
+        inputs = torch.cat((Z, X), dim=1)
+        q0 = model.net0(inputs).detach().cpu().numpy().reshape(-1)
+        q1 = model.net1(inputs).detach().cpu().numpy().reshape(-1)
+        a = A.detach().cpu().numpy().reshape(-1)
+    return {0: q0[a < 0.5], 1: q1[a > 0.5]}
+
+
+def _max_abs_q(q_by_treatment: Dict[int, np.ndarray]) -> float:
+    values = [arr for arr in q_by_treatment.values() if arr.size > 0]
+    if not values:
+        return 0.0
+    return float(max(np.abs(arr).max() for arr in values))
+
+
+def _q_distribution_stats(q_by_treatment: Dict[int, np.ndarray]) -> Dict[str, float]:
+    """Per-treatment-group Q distribution diagnostics (pilot HPO fix request
+    item 7): mean/SD/min/max, P50/P90/P95/P99, and q>10/50/100 proportions."""
+    stats: Dict[str, float] = {}
+    for level, q_level in q_by_treatment.items():
+        if q_level.size == 0:
+            continue
+        stats[f"q_a{level}_mean"] = float(q_level.mean())
+        stats[f"q_a{level}_sd"] = float(q_level.std())
+        stats[f"q_a{level}_min"] = float(q_level.min())
+        stats[f"q_a{level}_max"] = float(q_level.max())
+        for pct in (50, 90, 95, 99):
+            stats[f"q_a{level}_p{pct}"] = float(np.percentile(q_level, pct))
+        stats[f"q_a{level}_prop_gt10"] = float((q_level > 10).mean())
+        stats[f"q_a{level}_prop_gt50"] = float((q_level > 50).mean())
+        stats[f"q_a{level}_prop_gt100"] = float((q_level > 100).mean())
+    return stats
+
+
 def _run_optuna_tuning(
     data_name: str,
     dataset,
@@ -100,19 +156,33 @@ def _run_optuna_tuning(
     save_dir: Optional[Path] = None,
     scenario: Optional[int] = 1,
     tuning_seed: Optional[int] = None,
-) -> Dict[str, Any]:
+    return_study: bool = False,
+    storage: Optional[str] = None,
+    study_name: Optional[str] = None,
+):
     """
     1.在给定数据集上执行 K-fold CV 以进行 Optuna 调参。返回最优的超参数组合。
     2.如果提供了 save_dir, 则使用最佳参数在全量 dataset 上重新训练并保存模型。
+
+    Returns `final_best_params` (dict) by default. If `return_study=True`,
+    returns `(final_best_params, study, selected_trial, best_trial)` instead,
+    so a caller (e.g. hpo_protocol.py) can archive the full trial table and
+    the one-SE vs pure-minimum provenance (plan section 6.2).
+
+    `storage`/`study_name`: when given (e.g. "sqlite:///tune_results/
+    optuna_studies/q_u_round1.db"), the Optuna study is persisted there
+    (`load_if_exists=True`) instead of living only in memory, so a run
+    interrupted partway through can resume and add trials rather than
+    starting over (pilot HPO fix request item 7).
     """
     if not search_space:
         print("[Optuna] 未提供搜索空间，跳过调优。")
+        if return_study:
+            return base_train_params, None, None, None
         return base_train_params
 
     # 减少 Optuna 日志
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    batch_size = base_train_params["batch_size"]
 
     def objective(trial: optuna.Trial) -> float:
         # 为当前试验生成参数
@@ -121,6 +191,13 @@ def _run_optuna_tuning(
             current_params[param_name] = _suggest_from_trial(
                 trial, param_name, config
             )
+        # Plan 2.8d fix: read batch_size from THIS trial's params, not the
+        # fixed base config -- otherwise searching over batch_size has no effect.
+        batch_size = current_params["batch_size"]
+        q_hard_threshold = float(current_params.get("q_hard_threshold", DEFAULT_Q_HARD_THRESHOLD))
+        max_fold_train_seconds = float(
+            current_params.get("max_fold_train_seconds", DEFAULT_MAX_FOLD_TRAIN_SECONDS)
+        )
 
         # Record the fields the one-SE selection rule (plan 5.7) needs to rank
         # candidates by simplicity, regardless of whether they were searched
@@ -132,6 +209,16 @@ def _run_optuna_tuning(
         fold_scores: List[float] = []
         fold_sizes: List[int] = []
         fold_train_seconds: List[float] = []
+        fold_records: List[Dict[str, Any]] = []
+
+        def fail(fold_idx, reason, init_seed=None, shuffle_seed=None, train_result=None):
+            trial.set_user_attr("failure_reason", f"fold_{fold_idx}_{reason}")
+            fold_records.append(build_fold_record(
+                fold_idx, init_seed, shuffle_seed, current_params, float("inf"), train_result,
+                failure_reason=reason,
+            ))
+            trial.set_user_attr("fold_records", fold_records)
+            return float("inf")
 
         # Nested three-way split per outer fold (plan section 5.3):
         # gradient_train_idx/earlystop_val_idx drive this candidate's training
@@ -152,24 +239,27 @@ def _run_optuna_tuning(
                 },
             )
             if insufficient_reason is not None:
-                trial.set_user_attr("failure_reason", f"fold_{fold_idx}_{insufficient_reason}")
-                return float("inf")
+                return fail(fold_idx, insufficient_reason)
 
-            # Explicitly derive this fold's init seed from (random_seed, trial, fold_idx)
-            # instead of relying on however much of the global RNG stream earlier
-            # trials/folds already consumed.
-            fold_init_seed = make_seed_bundle(random_seed, trial.number, fold_idx).init_seed
+            # Pilot HPO fix request item 2: every trial evaluated on this fold
+            # shares the same model-init seed and the same DataLoader shuffle
+            # seed, derived only from (random_seed, fold_idx) -- NOT
+            # trial.number -- so a trial's score differs because of its
+            # hyperparameters, not because of a different random draw.
+            fold_init_seed, fold_shuffle_seed = fold_control_seeds(random_seed, fold_idx)
             set_random_seed(fold_init_seed)
 
             trainer = _create_trainer(
                 data_configs, current_params, random_seed, dump_folder=None, data_name=data_name
             )
 
+            shuffle_generator = torch.Generator().manual_seed(fold_shuffle_seed)
             train_loader = DataLoader(
                 dataset=Subset(dataset, gradient_train_idx.tolist()),
                 batch_size=batch_size,
                 shuffle=True,
                 num_workers=0,
+                generator=shuffle_generator,
             )
             earlystop_loader = DataLoader(
                 dataset=Subset(dataset, earlystop_val_idx.tolist()),
@@ -182,8 +272,26 @@ def _run_optuna_tuning(
                 model, train_result = trainer.train(train_loader, earlystop_loader)
                 # Plan 5.8: a fold that never got a valid checkpoint is a failure.
                 if train_result.stop_reason == "no_valid_checkpoint":
-                    trial.set_user_attr("failure_reason", f"fold_{fold_idx}_no_valid_checkpoint")
-                    return float("inf")
+                    return fail(fold_idx, "no_valid_checkpoint", fold_init_seed, fold_shuffle_seed, train_result)
+                # Pilot HPO fix request item 3: NaN/Inf seen during training
+                # itself (not just the final score) is a failure.
+                if train_result.n_nonfinite_train > 0 or train_result.n_nonfinite_val > 0:
+                    return fail(fold_idx, "nonfinite_during_training", fold_init_seed, fold_shuffle_seed, train_result)
+
+                q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
+                max_q = _max_abs_q(q_by_treatment)
+                # Pilot HPO fix request item 3: Q exceeding a pre-configured
+                # hard threshold is a failure, not a value to average in.
+                if max_q > q_hard_threshold:
+                    return fail(fold_idx, f"q_exceeds_hard_threshold(max_q={max_q:.2f})",
+                                fold_init_seed, fold_shuffle_seed, train_result)
+                # Pilot HPO fix request item 3: a pre-specified per-fold time
+                # budget this fold exceeded (checked after the fact -- this
+                # training loop is synchronous, so this cannot pre-empt a
+                # run already in progress, only flag it as a failure once done).
+                if train_result.train_seconds > max_fold_train_seconds:
+                    return fail(fold_idx, f"timeout(train_seconds={train_result.train_seconds:.1f})",
+                                fold_init_seed, fold_shuffle_seed, train_result)
 
                 # Unified V-statistic score (plan 5.4), on the untouched score fold.
                 fold_score, fold_n = _compute_unified_q_score(
@@ -191,17 +299,19 @@ def _run_optuna_tuning(
                 )
                 # Plan 5.8: NaN/Inf score is a failure, not a value to average in.
                 if not math.isfinite(fold_score):
-                    trial.set_user_attr("failure_reason", f"fold_{fold_idx}_nonfinite_score")
-                    return float("inf")
+                    return fail(fold_idx, "nonfinite_score", fold_init_seed, fold_shuffle_seed, train_result)
 
                 fold_scores.append(fold_score)
                 fold_sizes.append(fold_n)
                 fold_train_seconds.append(train_result.train_seconds)
+                fold_records.append(build_fold_record(
+                    fold_idx, fold_init_seed, fold_shuffle_seed, current_params, fold_score, train_result,
+                    failure_reason=None, extra=_q_distribution_stats(q_by_treatment),
+                ))
 
             except Exception as e:
-                trial.set_user_attr("failure_reason", f"fold_{fold_idx}_exception: {e}")
                 print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
-                return float("inf")
+                return fail(fold_idx, f"exception: {e}", fold_init_seed, fold_shuffle_seed)
 
             finally:
                 if 'model' in locals():
@@ -218,6 +328,7 @@ def _run_optuna_tuning(
         trial.set_user_attr("fold_sd", fold_sd)
         trial.set_user_attr("fold_se", fold_se)
         trial.set_user_attr("total_train_seconds", sum(fold_train_seconds))
+        trial.set_user_attr("fold_records", fold_records)
         return summary_score
 
 
@@ -226,7 +337,13 @@ def _run_optuna_tuning(
     )
     effective_tuning_seed = tuning_seed if tuning_seed is not None else random_seed
     sampler = optuna.samplers.TPESampler(seed=effective_tuning_seed)
-    study = optuna.create_study(direction="minimize", sampler=sampler)
+    if storage is not None:
+        study = optuna.create_study(
+            direction="minimize", sampler=sampler, storage=storage,
+            study_name=study_name or "nmmr_q_round1", load_if_exists=True,
+        )
+    else:
+        study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
 
     print(f"\n[Optuna] 调优完成。")
@@ -281,6 +398,8 @@ def _run_optuna_tuning(
                    
         print(f"[Save] 模型已保存: {save_path / model_filename}")
 
+    if return_study:
+        return final_best_params, study, selected_trial, best_trial
     return final_best_params
 
 def _run_cross_fitting(data_name:str,
@@ -290,12 +409,21 @@ def _run_cross_fitting(data_name:str,
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        log_folder: Optional[Path],
-                       tag: str) -> Tuple[torch.Tensor, List[float], np.ndarray]:
+                       tag: str) -> Tuple[torch.Tensor, List[float], np.ndarray, List[Dict[str, Any]]]:
     """
     对任意数据集执行 cross fitting:
     - 将数据划分为 n_splits 折
     - 在每折上训练模型（fold 内部再 8:2 划分 train/val）
     - 在其余折上直接计算 ATE_i，最后求均值
+
+    Returns a 4th value `fold_diagnostics`: one dict per fold with
+    `best_epoch`/`stopped_early`/`stop_reason`/`train_seconds` (from that
+    fold's TrainResult) plus `moment_risk`/`n_eval` -- the unified
+    V-statistic held-out moment risk (same scorer HPO uses, see plan 5.4),
+    evaluated on this fold's held-out eval split using the kernel bandwidth
+    already frozen from this fold's own gradient-training subset. This is
+    what plan 6.1/hpo_selection_plan.md section 9's pilot-confirm diagnostics
+    ("矩风险"、"所有折都恢复了最佳模型"、"训练时间") read from.
     """
     batch_size = train_params['batch_size']
     cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
@@ -303,9 +431,10 @@ def _run_cross_fitting(data_name:str,
     # 存储全量预测结果 (N, 1)
     dataset_len = len(dataset)
     q_preds_full = np.zeros((dataset_len, 1), dtype=np.float32)
-    
+
     fold_predictions: List[torch.Tensor] = []
     ate_values: List[float] = []
+    fold_diagnostics: List[Dict[str, Any]] = []
 
     for fold_idx, (train_idx, eval_idx) in enumerate(cf_kfold.split(np.arange(len(dataset))), start=1):
         print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
@@ -358,6 +487,16 @@ def _run_cross_fitting(data_name:str,
             # 存入全量数组 (注意索引对应)
             q_preds_full[eval_fold_indices] = q_pred.cpu().numpy()
 
+        moment_risk, n_eval = _compute_unified_q_score(trainer, model, dataset, eval_fold_indices)
+        fold_diagnostics.append({
+            "fold": fold_idx,
+            "moment_risk": moment_risk,
+            "n_eval": n_eval,
+            "best_epoch": fold_train_result.best_epoch,
+            "stopped_early": fold_train_result.stopped_early,
+            "stop_reason": fold_train_result.stop_reason,
+            "train_seconds": fold_train_result.train_seconds,
+        })
 
         empty_device_cache(trainer.device)
         del model
@@ -367,7 +506,7 @@ def _run_cross_fitting(data_name:str,
 
     ate_tensor = torch.stack(fold_predictions).mean()
     print(f"[CF-{tag}] 平均 ATE(PIPW): {ate_tensor.item():.6f}")
-    return ate_tensor, ate_values, q_preds_full
+    return ate_tensor, ate_values, q_preds_full, fold_diagnostics
 
 def _run_traditional_prediction(
     dataset,
@@ -461,10 +600,22 @@ def NMMR_Q_experiment(dataset_name: str,
     train_params_copy = copy.deepcopy(train_params)
     base_params, search_space = _parse_optuna_space(train_params_copy)
     n_splits = int(base_params.get('n_splits', 5))
-    
+
+    # NMMR_Q_experiment is the formal/fixed-parameter entrypoint: it no
+    # longer launches Optuna inline (pilot HPO fix request item 8).
+    # Hyperparameter search happens exclusively in
+    # scripts/run_pilot_protocol.py (which calls _run_optuna_tuning
+    # directly, not through this function) and ends in a frozen config.
+    if search_space:
+        raise ValueError(
+            f"NMMR_Q_experiment no longer runs HPO inline; train_params still "
+            f"has an Optuna search space for {list(search_space)}. "
+            "Run scripts/run_pilot_protocol.py first and provide a frozen config."
+        )
+
     if dataset is not None:
         set_random_seed(init_seed)
-        ate_estimate, ate_values, q_preds = _run_cross_fitting(
+        ate_estimate, ate_values, q_preds, fold_diagnostics = _run_cross_fitting(
             data_name=dataset_key,
             dataset=dataset,
             n_splits=n_splits,
@@ -477,10 +628,11 @@ def NMMR_Q_experiment(dataset_name: str,
         # 返回结果供 double_rob.py 使用
         return {
             "PIPW": ate_estimate.item(),
-            "q_preds": q_preds
+            "q_preds": q_preds,
+            "fold_diagnostics": fold_diagnostics,
         }
     
-    hpo_n_trials = int(base_params.pop('hpo_n_trials', 20))  
+    base_params.pop('hpo_n_trials', None)  # HPO-only metadata, unused now that this function no longer tunes.
     final_train_params: Dict[str, Any] = {}
 
 
@@ -500,7 +652,7 @@ def NMMR_Q_experiment(dataset_name: str,
                 df = generate_data(n_samples=n_samples, scenario=scenario, seed=trial_seeds.data_seed)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
                 set_random_seed(trial_seeds.init_seed)
-                ate_estimate, ate_values,_ = _run_cross_fitting(
+                ate_estimate, ate_values, _, _ = _run_cross_fitting(
                     data_name=dataset_key,
                     dataset=dataset_trial,
                     n_splits=n_splits,
@@ -554,32 +706,14 @@ def NMMR_Q_experiment(dataset_name: str,
             if cf_path is None:
                 raise FileNotFoundError(f"未在 {data_base_path} 找到 cross-fitting 数据 (例如 sgd_cf.csv)。")
 
-            base_dataset = SGDDataset(train_path, device=device)
             cf_dataset = SGDDataset(cf_path, device=device)
 
-            # 在 SGD 训练集 (base_dataset) 上执行 HPO 调参
-        
-            if search_space:
-                print("\n===> 开始 SGD 训练集 K-fold (Optuna 调参)")
-                set_random_seed(init_seed)
-                final_train_params = _run_optuna_tuning(
-                    data_name = dataset_key,
-                    dataset=base_dataset,
-                    n_splits=n_splits,
-                    n_trials=hpo_n_trials,
-                    base_train_params=base_params,
-                    search_space=search_space,
-                    data_configs=data_configs,
-                    random_seed=random_seed,
-                    tuning_seed=tuning_seed,
-                )
-            else:
-                print("\n===> 使用 config 中的固定参数")
-                final_train_params = base_params
+            print("\n===> 使用 config 中的固定参数")
+            final_train_params = base_params
 
             print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
             set_random_seed(init_seed)
-            ate_estimate, ate_values, _ = _run_cross_fitting(
+            ate_estimate, ate_values, _, _ = _run_cross_fitting(
                 data_name=dataset_key,
                 dataset=cf_dataset,
                 n_splits=n_splits,
@@ -598,24 +732,8 @@ def NMMR_Q_experiment(dataset_name: str,
         print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
         
         train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        if search_space:
-            print("\n===> [RHC] 开始训练集 K-fold HPO")
-            set_random_seed(init_seed)
-            final_train_params = _run_optuna_tuning(
-                data_name=dataset_key,
-                dataset=train_dataset,
-                n_splits=n_splits,
-                n_trials=hpo_n_trials,
-                base_train_params=base_params,
-                search_space=search_space,
-                data_configs=trainer_data_configs,
-                random_seed=random_seed,
-                tuning_seed=tuning_seed,
-            )
-        else:
-            print("\n===> [RHC] 跳过 HPO,使用默认参数")
-            final_train_params = base_params
-
+        print("\n===> [RHC] 使用 config 中的固定参数")
+        final_train_params = base_params
 
         print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
         val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
@@ -625,7 +743,7 @@ def NMMR_Q_experiment(dataset_name: str,
         print(f"     全量数据样本数: {len(full_dataset)}")
 
         set_random_seed(init_seed)
-        ate_estimate, ate_values, _ = _run_cross_fitting(
+        ate_estimate, ate_values, _, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=full_dataset, # 在全量数据上进行 Cross Fitting
             n_splits=n_splits,
