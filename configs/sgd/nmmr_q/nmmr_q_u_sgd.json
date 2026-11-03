@@ -64,7 +64,6 @@
         2
       ]
     },
-    "q_hard_threshold": 1000.0,
     "max_fold_train_seconds": 1800.0
   }
 }

@@ -453,6 +453,10 @@ def _run_cross_fitting(data_name:str,
             "best_epoch": fold_train_result.best_epoch,
             "stopped_early": fold_train_result.stopped_early,
             "stop_reason": fold_train_result.stop_reason,
+            # Direct signal pilot-confirm's all_folds_restored_best_checkpoint
+            # check relies on (精简与config管理.md Phase C follow-up) -- not
+            # inferred from stop_reason, which stays only as a diagnostic.
+            "best_state_restored": fold_train_result.best_state_restored,
             "train_seconds": fold_train_result.train_seconds,
         })
 

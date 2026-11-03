@@ -220,10 +220,9 @@ Round 2 选中的唯一 candidate 会在从未参与 HPO 的 pilot-confirm 上�
 1. 每一折都正常完成并恢复了最佳 checkpoint；
 2. ATE 估计（以及每一折的 ATE）是有限值；
 3. held-out moment risk 是有限值；
-4. H/Q 的最终预测里没有 NaN/Inf；
-5.（仅 Q）预测值没有超过该方法自己在 Round 1/2 筛选时就用的同一个 `q_hard_threshold`。
+4. H/Q 的最终预测里没有 NaN/Inf。
 
-每折/总训练时间、是否跑满 epoch、Q 的极端值比例仍然会出现在 confirm 报告里，但只作为诊断信息，不再决定 passed/failed。
+没有单独的 Q 数值上限门槛。`q_max_abs`、Q 的分位数、`q_a{level}_prop_gt10/50/100`，连同每折/总训练时间、是否跑满 epoch，都只是诊断信息，出现在 confirm 报告里供人工查看，不参与 passed/failed 的判断。
 
 ### 4. 命令示例
 

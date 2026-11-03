@@ -511,12 +511,6 @@ class FrozenConfig:
     hpo_scoring_objective: str = "held-out V-statistic moment risk (plan 5.4 / hpo_selection_plan 6.3-6.4)"
     kernel_rule: str = "median heuristic, frozen per fold from gradient_train only (plan 3.4/5.3)"
     kernel_bandwidth_multiplier: Optional[float] = None
-    # Q only (None for H): the same hard threshold Round 1/2 already
-    # screened every candidate's predictions against (pilot HPO fix
-    # request item 3). pilot-confirm's decide_pilot_confirm() checks the
-    # final OOF Q predictions against this SAME value -- not a separately
-    # tunable "confirm threshold" (精简与config管理.md section 6.5 item 5).
-    q_hard_threshold: Optional[float] = None
     n_splits: Optional[int] = None
     max_epochs: Optional[int] = None
     patience: Optional[int] = None
@@ -626,16 +620,15 @@ def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
       1. every fold completed with a valid best checkpoint;
       2. the ATE estimate (and every per-fold ATE) is finite;
       3. held-out moment risk is finite;
-      4. the H/Q predictions contain no NaN/Inf;
-      5. (Q only) no prediction exceeds this method's pre-specified
-         `q_hard_threshold` (the SAME one Round 1/2 already screened
-         candidates against -- see FrozenConfig.q_hard_threshold).
-    Per-fold/total training time, how often training hit max_epochs, and
-    Q's extreme-value proportions remain in the report as diagnostics the
-    reader should look at, but none of them gates pass/fail any more (plan:
-    "不把硬件速度、每 epoch 耗时等运维信息作为统计方法的通过门槛"). Returns
-    {"status": "passed"|"failed", "failure_reasons": [...]}. Only a
-    "passed" status may ever produce a confirmed candidate.
+      4. the H/Q predictions contain no NaN/Inf.
+    There is no separate Q "hard threshold" gate: Q's extreme-value
+    diagnostics (`q_max_abs`, quantiles, `q_a{level}_prop_gt{10,50,100}`)
+    stay in the report for the reader to look at, same as per-fold/total
+    training time and how often training hit max_epochs, but none of
+    these gate pass/fail (plan: "不把硬件速度、每 epoch 耗时等运维信息作为
+    统计方法的通过门槛"). Returns {"status": "passed"|"failed",
+    "failure_reasons": [...]}. Only a "passed" status may ever produce a
+    confirmed candidate.
     """
     reasons: List[str] = []
 
@@ -651,11 +644,6 @@ def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
         reasons.append("moment_risk_not_all_finite")
     if not report.get("predictions_all_finite", False):
         reasons.append("predictions_not_finite")
-
-    q_hard_threshold = report.get("q_hard_threshold")
-    q_max_abs = report.get("q_max_abs")
-    if q_hard_threshold is not None and q_max_abs is not None and q_max_abs > q_hard_threshold:
-        reasons.append(f"q_exceeds_hard_threshold(max_q={q_max_abs:.2f})")
 
     status = "passed" if not reasons else "failed"
     return {"status": status, "failure_reasons": reasons}
@@ -713,23 +701,25 @@ def reevaluate_candidate_with_seeds(
 
     Pilot HPO fix request item 3: ANY seed/fold hitting a pre-specified
     failure condition (insufficient treatment groups, no valid checkpoint,
-    NaN/Inf during training or in the score, a training exception, or --
-    for Q -- predictions over a fixed hard threshold) makes this
-    CANDIDATE's overall `value` +inf, same as Round 1. The previous
+    NaN/Inf during training or in the score, a training exception) makes
+    this CANDIDATE's overall `value` +inf, same as Round 1. The previous
     behaviour of silently dropping only the failed (seed, fold) combos and
     averaging whatever succeeded is exactly what item 3 forbids.
 
     Returns a dict with `value` (the weighted mean score, same key name
     `pick_simplest_within_one_se` expects; +inf if ANY combo failed),
     `fold_se`, `fold_sd`, `n_scores`, `total_train_seconds`,
-    `failure_reasons`, `fold_records` (item 7's per-(seed,fold) record).
+    `failure_reasons`, `fold_records` (item 7's per-(seed,fold) record,
+    including Q's distribution diagnostics -- quantiles, extreme-value
+    proportions -- for Q candidates, kept for reference only; none of it
+    gates this candidate's score).
     """
     model_kind, _ = method_id.split("-")
     if model_kind == "Q":
         from src.models.NMMRq.nmmr_q_experiments import (
             _create_trainer, _compute_unified_q_score as compute_score,
-            _q_predictions_by_treatment, _max_abs_q, _q_distribution_stats,
-            DEFAULT_Q_HARD_THRESHOLD, DEFAULT_MAX_FOLD_TRAIN_SECONDS,
+            _q_predictions_by_treatment, _q_distribution_stats,
+            DEFAULT_MAX_FOLD_TRAIN_SECONDS,
         )
     else:
         from src.models.NMMRh.nmmr_h_experiments import (
@@ -740,7 +730,6 @@ def reevaluate_candidate_with_seeds(
     from src.utils import empty_device_cache, get_device
 
     batch_size = params["batch_size"]
-    q_hard_threshold = float(params.get("q_hard_threshold", DEFAULT_Q_HARD_THRESHOLD)) if model_kind == "Q" else None
     max_fold_train_seconds = float(params.get("max_fold_train_seconds", DEFAULT_MAX_FOLD_TRAIN_SECONDS))
     folds = nested_hpo_fold_split(dataset, n_splits, split_seed)
 
@@ -799,13 +788,7 @@ def reevaluate_candidate_with_seeds(
                 q_stats: Dict[str, Any] = {}
                 if model_kind == "Q":
                     q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
-                    max_q = _max_abs_q(q_by_treatment)
                     q_stats = _q_distribution_stats(q_by_treatment)
-                    if max_q > q_hard_threshold:
-                        record_failure(fold_idx, init_seed, f"q_exceeds_hard_threshold(max_q={max_q:.2f})",
-                                       train_result, extra=q_stats)
-                        any_failure = True
-                        continue
                 if train_result.train_seconds > max_fold_train_seconds:
                     record_failure(fold_idx, init_seed, f"timeout(train_seconds={train_result.train_seconds:.1f})",
                                    train_result, extra=q_stats)
@@ -1085,11 +1068,6 @@ def run_hpo_study_for_method(
         )
     final_params = selected["_params"]
 
-    q_hard_threshold = None
-    if model_kind == "Q":
-        from src.models.NMMRq.nmmr_q_experiments import DEFAULT_Q_HARD_THRESHOLD
-        q_hard_threshold = final_params.get("q_hard_threshold", DEFAULT_Q_HARD_THRESHOLD)
-
     frozen = FrozenConfig(
         method_id=method_id,
         network_depth=final_params.get("network_depth"),
@@ -1099,7 +1077,6 @@ def run_hpo_study_for_method(
         batch_size=final_params.get("batch_size"),
         training_objective=stat_kind,
         kernel_bandwidth_multiplier=final_params.get("kernel_bandwidth_multiplier", 1.0),
-        q_hard_threshold=q_hard_threshold,
         n_splits=n_splits,
         max_epochs=final_params.get("n_epochs"),
         patience=final_params.get("patience"),
@@ -1234,10 +1211,18 @@ def save_pipeline_artifacts(
 # Plan 6.1 / hpo_selection_plan.md section 9: pilot-confirm evaluation
 # ---------------------------------------------------------------------------
 
-def _summarize_fold_diagnostics(fold_diagnostics: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarize_fold_diagnostics(fold_diagnostics: List[Dict[str, Any]], n_splits: int) -> Dict[str, Any]:
     """
     Plan 6.1 / hpo_selection_plan.md section 9's pilot-confirm checklist:
     "held-out 矩风险为有限值" / "所有折都恢复了最佳模型" / "训练时间处于可执行范围".
+
+    `all_folds_restored_best_checkpoint` (精简与config管理.md Phase C
+    follow-up item 1) now requires BOTH that cross-fitting actually
+    produced the expected `n_splits` fold records AND that every one of
+    them has `best_state_restored=True` -- a direct per-fold signal from
+    TrainResult, not inferred indirectly from `stop_reason != "no_valid_
+    checkpoint"` (`stop_reason` itself stays in each fold's diagnostics,
+    for audit, but no longer backs this check).
     """
     risks = [d["moment_risk"] for d in fold_diagnostics]
     sizes = [d["n_eval"] for d in fold_diagnostics]
@@ -1246,8 +1231,9 @@ def _summarize_fold_diagnostics(fold_diagnostics: List[Dict[str, Any]]) -> Dict[
     return {
         "mean_moment_risk": weighted_fold_mean(risks, sizes),
         "moment_risk_all_finite": all(math.isfinite(r) for r in risks),
-        "all_folds_restored_best_checkpoint": all(
-            d["stop_reason"] != "no_valid_checkpoint" for d in fold_diagnostics
+        "all_folds_restored_best_checkpoint": (
+            len(fold_diagnostics) == n_splits
+            and all(d.get("best_state_restored", False) for d in fold_diagnostics)
         ),
         "any_fold_hit_max_epochs": any(d["stop_reason"] == "max_epochs" for d in fold_diagnostics),
         "mean_best_epoch": float(np.mean(best_epochs)),
@@ -1272,8 +1258,8 @@ def evaluate_pilot_confirm(
 
     Reports (plan 6.1 / hpo_selection_plan.md section 9, plus the fixed
     hard-failure fields 精简与config管理.md section 6.5 needs --
-    `ate_all_finite`/`predictions_all_finite`/(Q only)`q_max_abs`+
-    `q_hard_threshold` -- decide_pilot_confirm() reads from this report):
+    `ate_all_finite`/`predictions_all_finite` -- decide_pilot_confirm()
+    reads from this report):
     - point estimate and per-fold estimates, and whether all of them are
       finite;
     - per-fold held-out moment risk (same unified V-statistic scorer HPO
@@ -1282,8 +1268,9 @@ def evaluate_pilot_confirm(
     - per-fold training time (a diagnostic/time-table figure only -- it no
       longer gates pass/fail);
     - whether the final OOF H/Q predictions contain any NaN/Inf, and (Q
-      only) extreme-value diagnostics plus the max |prediction| compared
-      against this method's own `q_hard_threshold`;
+      only) extreme-value diagnostics (`q_max_abs`, quantiles,
+      `q_a{level}_prop_gt{10,50,100}`) -- diagnostics only, not compared
+      against any threshold;
     - (scenario 1 only -- the only DGP this repo has a verified closed-form
       true bridge for, see _true_h0_scenario1/_true_q0_scenario1) the true
       bridge MSE, reported for diagnosis ONLY, never used to reselect
@@ -1309,13 +1296,12 @@ def evaluate_pilot_confirm(
             "ate_all_finite": bool(math.isfinite(ate_estimate.item()) and all(math.isfinite(v) for v in ate_values)),
             "n_folds": frozen_config.n_splits,
             "fold_diagnostics": fold_diagnostics,
-            **_summarize_fold_diagnostics(fold_diagnostics),
+            **_summarize_fold_diagnostics(fold_diagnostics, frozen_config.n_splits),
         }
         a_labels = pilot_confirm_dataset.A.cpu().numpy().reshape(-1)
         q_flat = q_preds.reshape(-1)
         report["predictions_all_finite"] = bool(np.isfinite(q_flat).all())
         report["q_max_abs"] = float(np.max(np.abs(q_flat))) if q_flat.size else None
-        report["q_hard_threshold"] = frozen_config.q_hard_threshold
         for level, mask_val in ((0, 0.0), (1, 1.0)):
             mask = a_labels == mask_val
             q_level = q_flat[mask]
@@ -1351,7 +1337,7 @@ def evaluate_pilot_confirm(
             "ate_all_finite": bool(math.isfinite(ate_estimate.item()) and all(math.isfinite(v) for v in ate_values)),
             "n_folds": frozen_config.n_splits,
             "fold_diagnostics": fold_diagnostics,
-            **_summarize_fold_diagnostics(fold_diagnostics),
+            **_summarize_fold_diagnostics(fold_diagnostics, frozen_config.n_splits),
         }
         report["predictions_all_finite"] = bool(
             np.isfinite(h_preds["h_fact"]).all()

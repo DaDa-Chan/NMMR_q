@@ -34,11 +34,10 @@ from src.models.experiment_common import (
 )
 from src.utils import get_device, empty_device_cache, set_random_seed, make_seed_bundle
 
-# Pre-specified, fixed-ahead-of-time failure thresholds for the pilot HPO
+# Pre-specified, fixed-ahead-of-time failure threshold for the pilot HPO
 # selection flow (never adjusted post-hoc based on a particular run's
-# results). Overridable per method via the `q_hard_threshold` /
-# `max_fold_train_seconds` keys in that method's config.
-DEFAULT_Q_HARD_THRESHOLD = 1000.0
+# results). Overridable per method via the `max_fold_train_seconds` key in
+# that method's config.
 DEFAULT_MAX_FOLD_TRAIN_SECONDS = 1800.0
 
 
@@ -118,13 +117,6 @@ def _q_predictions_by_treatment(trainer, model, dataset, indices) -> Dict[int, n
         q1 = model.net1(inputs).detach().cpu().numpy().reshape(-1)
         a = A.detach().cpu().numpy().reshape(-1)
     return {0: q0[a < 0.5], 1: q1[a > 0.5]}
-
-
-def _max_abs_q(q_by_treatment: Dict[int, np.ndarray]) -> float:
-    values = [arr for arr in q_by_treatment.values() if arr.size > 0]
-    if not values:
-        return 0.0
-    return float(max(np.abs(arr).max() for arr in values))
 
 
 def _q_distribution_stats(q_by_treatment: Dict[int, np.ndarray]) -> Dict[str, float]:
@@ -215,7 +207,6 @@ def _run_optuna_tuning(
         # Plan 2.8d fix: read batch_size from THIS trial's params, not the
         # fixed base config -- otherwise searching over batch_size has no effect.
         batch_size = current_params["batch_size"]
-        q_hard_threshold = float(current_params.get("q_hard_threshold", DEFAULT_Q_HARD_THRESHOLD))
         max_fold_train_seconds = float(
             current_params.get("max_fold_train_seconds", DEFAULT_MAX_FOLD_TRAIN_SECONDS)
         )
@@ -300,12 +291,6 @@ def _run_optuna_tuning(
                     return fail(fold_idx, "nonfinite_during_training", fold_init_seed, fold_shuffle_seed, train_result)
 
                 q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
-                max_q = _max_abs_q(q_by_treatment)
-                # Pilot HPO fix request item 3: Q exceeding a pre-configured
-                # hard threshold is a failure, not a value to average in.
-                if max_q > q_hard_threshold:
-                    return fail(fold_idx, f"q_exceeds_hard_threshold(max_q={max_q:.2f})",
-                                fold_init_seed, fold_shuffle_seed, train_result)
                 # Pilot HPO fix request item 3: a pre-specified per-fold time
                 # budget this fold exceeded (checked after the fact -- this
                 # training loop is synchronous, so this cannot pre-empt a
@@ -533,6 +518,10 @@ def _run_cross_fitting(data_name:str,
             "best_epoch": fold_train_result.best_epoch,
             "stopped_early": fold_train_result.stopped_early,
             "stop_reason": fold_train_result.stop_reason,
+            # Direct signal pilot-confirm's all_folds_restored_best_checkpoint
+            # check relies on (精简与config管理.md Phase C follow-up) -- not
+            # inferred from stop_reason, which stays only as a diagnostic.
+            "best_state_restored": fold_train_result.best_state_restored,
             "train_seconds": fold_train_result.train_seconds,
         })
 

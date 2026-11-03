@@ -64,7 +64,7 @@ from src.models.experiment_common import _parse_optuna_space
 def _load_method_config(method_id: str):
     """Load this method's real config file under configs/sgd/, the same
     files production runs would use (already updated to plan 5.6's search
-    space, plus the pilot HPO fix's q_hard_threshold/max_fold_train_seconds).
+    space, plus the pilot HPO fix's max_fold_train_seconds).
     Returns (data_configs, train_params, raw_bytes) -- `raw_bytes` is the
     file's exact, unmodified bytes (parsed via `json.loads`, never
     round-tripped through `json.dump`), saved verbatim as this run's search
