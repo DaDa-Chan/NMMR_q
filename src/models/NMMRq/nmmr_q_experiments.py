@@ -162,6 +162,7 @@ def _run_optuna_tuning(
     return_study: bool = False,
     storage: Optional[str] = None,
     study_name: Optional[str] = None,
+    existing_trial_count: int = 0,
 ):
     """
     1.在给定数据集上执行 K-fold CV 以进行 Optuna 调参。返回最优的超参数组合。
@@ -177,6 +178,23 @@ def _run_optuna_tuning(
     (`load_if_exists=True`) instead of living only in memory, so a run
     interrupted partway through can resume and add trials rather than
     starting over (pilot HPO fix request item 7).
+
+    `existing_trial_count`: how many trials the persisted study already
+    has BEFORE this call (0 for a brand-new study). A resumed run must NOT
+    reuse the exact same `tuning_seed` to build its TPESampler -- the
+    sampler itself is never persisted, only the trials are, so a freshly
+    constructed `TPESampler(seed=tuning_seed)` would otherwise replay the
+    EXACT SAME "random startup" draws every time, silently re-suggesting
+    the whole first batch of hyperparameters again on every resume
+    (精简与config管理.md Phase A follow-up: "恢复运行可能重复抽到相同参数").
+    When `existing_trial_count > 0`, the sampler seed is deterministically
+    re-derived from (tuning_seed, existing_trial_count) instead, so a
+    resumed batch is not forced to replay the first batch wholesale. This
+    does not guarantee zero overlap with any earlier trial -- a different
+    sampler seed can still land on the same point by chance (e.g. a
+    categorical choice with few options) -- only that resuming no longer
+    *systematically* reproduces the previous batch via an unchanged
+    sampler seed.
     """
     if not search_space:
         print("[Optuna] 未提供搜索空间，跳过调优。")
@@ -339,6 +357,10 @@ def _run_optuna_tuning(
         f"[Optuna] 开始 {n_trials} 次试验的 K-fold (k={n_splits}) 调优..."
     )
     effective_tuning_seed = tuning_seed if tuning_seed is not None else random_seed
+    if existing_trial_count > 0:
+        # Resumed run: derive a NEW, reproducible sampler seed instead of
+        # replaying the exact same TPESampler from scratch (see docstring).
+        effective_tuning_seed = make_seed_bundle(effective_tuning_seed, existing_trial_count).tuning_seed
     sampler = optuna.samplers.TPESampler(seed=effective_tuning_seed)
     if storage is not None:
         study = optuna.create_study(

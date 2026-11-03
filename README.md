@@ -46,7 +46,7 @@ NMMR_q/
 │   └── figures/                  #   生成的图表（PNG + PDF）
 ├── predicts/                     # 模型预测输出
 ├── train_results/                # 训练日志
-├── tune_results/                 # HPO study、trial 表、Round 2 与 confirm 报告
+├── tune_results/                 # HPO study、trial 表、Round 2、confirm 报告与 candidate
 ├── report/                       # LaTeX 报告
 │   ├── report.tex                #   英文报告
 │   ├── report_cn.tex             #   中文报告
@@ -145,7 +145,7 @@ Q-V -> configs/sgd/nmmr_q/nmmr_q_v_sgd.json
 ### 3. 调参的完整顺序
 
 ```text
-读取方法的搜索 config
+读取方法的搜索 config，原样复制一份到 --results_dir 作为快照
         ↓
 生成/复用 pilot-select 与 pilot-confirm
         ↓
@@ -155,12 +155,13 @@ Round 1：Optuna TPE 初筛
         ↓
 Round 2：top-k × 多个 init seed × K-fold 重新训练
         ↓
-one-standard-error rule 选择一个 provisional candidate
+one-standard-error rule 选择一个 candidate
         ↓
 在独立 pilot-confirm 上进行一次 cross-fitting 确认
         ↓
-通过：写入 --config_dir
-失败：只在 --results_dir 保存 provisional config 和失败报告
+无论通过还是失败：candidate 都保存到 --results_dir/candidates/，
+confirm_status=passed|failed 和失败原因记在 candidate 里面；
+代码从不写入 configs/sgd_frozen/，晋升为正式 config 是人工操作
 ```
 
 #### 3.1 pilot-select 与 pilot-confirm
@@ -234,8 +235,7 @@ python scripts/run_pilot_protocol.py \
   --n_splits 3 \
   --patience 5 \
   --data_dir data/pilot \
-  --results_dir tune_results/q_u_smoke_v1 \
-  --config_dir tune_results/q_u_smoke_v1/confirmed_configs
+  --results_dir tune_results/q_u_smoke_v1
 ```
 
 smoke test 只用于检查代码路径、数值稳定性和大致耗时，不用于生成正式参数。
@@ -256,11 +256,13 @@ python scripts/run_pilot_protocol.py \
   --scenario 1 \
   --base_seed 20261103 \
   --data_dir data/pilot \
-  --results_dir tune_results/q_u_formal_v1 \
-  --config_dir tune_results/q_u_formal_v1/confirmed_configs
+  --results_dir tune_results/q_u_formal_v1
 ```
 
-这里故意将 `--config_dir` 放在当次 `results_dir` 内，避免尚未人工比较的 candidate 直接覆盖 `configs/sgd_frozen/` 中的正式 config。
+没有 `--config_dir`：这条命令永远不会碰 `configs/sgd_frozen/`。跑完之后去看
+`tune_results/q_u_formal_v1/candidates/q_u_candidate_config.json` 里的
+`confirm_status`，确认是 `passed` 后再自己手动复制到
+`configs/sgd_frozen/q_u_frozen_config.json`（见第 9 节）。
 
 #### 4.3 相同 study 追加 trial
 
@@ -279,19 +281,17 @@ python scripts/run_pilot_protocol.py \
   --patience 30 \
   --base_seed 20261103 \
   --data_dir data/pilot \
-  --results_dir tune_results/q_u_formal_v1 \
-  --config_dir tune_results/q_u_formal_v1/confirmed_configs
+  --results_dir tune_results/q_u_formal_v1
 ```
 
-`--n_trials 20` 表示“本次再追加20个”。如果原 study 已有30个 trial，运行后累计50个；原有30个不会被删除。
+`--n_trials 20` 表示“本次再追加20个”。如果原 study 已有30个 trial，运行后累计50个；原有30个不会被删除。恢复运行时，Optuna sampler 的种子会根据已有 trial 数重新派生，不会因为复用同一个 sampler seed 而整批重放第一批的参数——但不同 seed 之间偶然抽到同一个点（例如某个可选项很少的分类参数）仍然可能发生，这不是本次修复要消除的目标。
 
 #### 4.4 修改搜索范围
 
 修改对应的 `configs/sgd/...json` 后，必须使用新目录：
 
 ```bash
---results_dir tune_results/q_u_refined_v1 \
---config_dir tune_results/q_u_refined_v1/confirmed_configs
+--results_dir tune_results/q_u_refined_v1
 ```
 
 不同搜索范围的 candidate 默认不合并。coarse study 用于找合理范围，refined/formal study 用于产生最终 candidate。
@@ -312,9 +312,10 @@ python scripts/run_pilot_protocol.py \
 | `--scenario` | `1` | SGD DGP scenario |
 | `--base_seed` | `20261103` | 派生 pilot data、split 和 tuning seed 的基础 seed |
 | `--data_dir` | `data/pilot` | pilot 数据根目录 |
-| `--results_dir` | `tune_results` | Optuna DB、Round 1/2 表和 confirm 报告的输出目录 |
-| `--config_dir` | `configs/sgd_frozen` | confirm 通过后 frozen config 的写入目录；建议调参时指向当次 results 目录 |
+| `--results_dir` | `tune_results` | 这次运行的全部产物（搜索 config 快照、Optuna DB、Round 1/2 表、confirm 报告、candidate）的输出目录 |
 | `--force-regenerate` | 关闭 | 只重新生成当前请求的 select/confirm 样本量，不影响其他样本量 |
+
+没有 `--config_dir`：HPO 代码不写 `configs/sgd_frozen/`，这个目录只能由人手动维护（第 9 节）。
 
 `--force-regenerate` 不应用作普通的恢复运行选项。如果旧数据与 manifest 一致，默认直接复用即可。
 
@@ -337,38 +338,45 @@ python scripts/run_pilot_protocol.py \
 
 ```bash
 --methods Q-U \
---results_dir tune_results/q_u_formal_v1 \
---config_dir tune_results/q_u_formal_v1/confirmed_configs
+--results_dir tune_results/q_u_formal_v1
 ```
 
 则主要产物为：
 
 ```text
 tune_results/q_u_formal_v1/
+├── search_config_snapshot.json       # 本次运行使用的搜索 config 原文
 ├── optuna_studies/
 │   └── q_u_round1.db
 ├── q_u_round1_trials.csv
 ├── q_u_round2_finalists.csv
 ├── q_u_pilot_confirm_report.json
-├── q_u_provisional_config.json       # 仅 confirm 失败时生成
-└── confirmed_configs/
-    └── q_u_frozen_config.json        # 仅 confirm 通过时生成
+└── candidates/
+    └── q_u_candidate_config.json     # 无论 confirm 通过还是失败都会生成
 ```
+
+一次运行多个 `--methods` 时，`search_config_snapshot.json` 换成
+`search_configs/{method}.json`（每个方法一份，例如 `search_configs/q_u.json`、
+`search_configs/h_u.json`），其余文件按 method 各自独立，不受影响。
 
 | 文件 | 内容 |
 |---|---|
+| `search_config_snapshot.json`（或 `search_configs/{method}.json`） | 该方法这次运行实际读取的搜索 config 原始内容，逐字节复制，用于追溯 |
 | `q_u_round1.db` | Optuna SQLite study，保留所有历史 trial，用于追加/恢复 Round 1 |
 | `q_u_round1_trials.csv` | Round 1 的 trial/fold 超参数、seed、矩风险、训练结果和失败原因 |
 | `q_u_round2_finalists.csv` | top-k candidate 在多 init seed、多 fold 下的重新评估结果 |
 | `q_u_pilot_confirm_report.json` | 独立 confirm 的 ATE、moment risk、Q 诊断、真桥 MSE 和通过/失败原因 |
-| `q_u_provisional_config.json` | confirm 失败的候选参数，不是正式 config |
-| `q_u_frozen_config.json` | confirm 通过的 `FrozenConfig` 产物 |
+| `candidates/q_u_candidate_config.json` | 这次选中的候选参数（`FrozenConfig`），`confirm_status`/`confirm_failure_reasons` 字段记录 confirm 是否通过及原因；**无论通过还是失败都会写**，从来不是正式 config |
 
-#### 覆盖注意
+#### 不会自动覆盖 configs/sgd_frozen/
 
-当前代码在 confirm 通过后会以普通写入方式保存到 `--config_dir` 中的固定文件名。同一 method 再次通过 confirm 时，会覆盖该 `config_dir` 中的同名文件。
-
-在 candidate/正式 config 完全分离前，建议每次搜索范围使用独立的 `results_dir` 和其内部的 `config_dir`，不要在试验阶段使用默认 `configs/sgd_frozen`。
+HPO 代码（`save_pipeline_artifacts`）只写 `--results_dir`，不接受任何指向
+`configs/sgd_frozen/` 的参数，也没有任何函数会自动写入该目录。candidate
+通过 confirm 之后，晋升为正式 config 永远是人工步骤：自己确认
+`confirm_status=="passed"`、method 正确、config 里没有残留的搜索范围或
+`hpo_n_trials`，然后手动把 `candidates/q_u_candidate_config.json` 复制成
+`configs/sgd_frozen/q_u_frozen_config.json`。不同搜索范围用不同
+`results_dir`，各自的 candidate 互不覆盖。
 
 ### 8. 如何挑选最终参数
 
@@ -389,16 +397,16 @@ tune_results/q_u_formal_v1/
 
 pilot-confirm 只是最终的 passed/failed 检查，不用 confirm ATE 误差、真桥 MSE 或 confirm moment risk 在多个 candidate 之间继续挑参数。H-U、H-V、Q-U、Q-V 是后续横向比较的四种方法，每种方法各自保留一份最终 config，不是从四种方法中只选一种。
 
-### 9. HPO FrozenConfig 与正式实验的当前接口
+### 9. HPO candidate 与正式实验的当前接口
 
-HPO 生成的 `q_u_frozen_config.json` 是 `FrozenConfig` 产物，它包含选定参数、seed、Round 1/2 信息、status 和 `config_hash`。
+HPO 生成的 `candidates/q_u_candidate_config.json` 是 `FrozenConfig` 产物，它包含选定参数、seed、Round 1/2 信息、`status`、`confirm_status`/`confirm_failure_reasons` 和 `config_hash`。只有当你自己确认 `confirm_status=="passed"` 之后，手动把这个文件复制成 `configs/sgd_frozen/q_u_frozen_config.json`，它才算是正式 config——HPO 代码本身不会做这一步。
 
-它与旧的 `configs/sgd/.../*_fixed.json` 不是同一外层 JSON 格式：
+无论是 candidate 还是复制后的 `frozen_config.json`，它与旧的 `configs/sgd/.../*_fixed.json` 都不是同一外层 JSON 格式：
 
-- HPO `FrozenConfig` 是扁平的调参产物；
+- `FrozenConfig` 是扁平的调参产物；
 - `experiment.py --config_path` 当前仍要求包含 `data_configs` 和 `train_params` 的实验 config。
 
-因此，当前不要直接将 HPO `q_u_frozen_config.json` 传给 `experiment.py --config_path`。HPO 内部的 pilot-confirm 会通过 `FrozenConfig.to_train_params()` 正确解析它；正式 loader 与手动 promotion 流程仍需统一。
+因此，当前不要直接将 HPO 的 candidate/frozen config 传给 `experiment.py --config_path`。HPO 内部的 pilot-confirm 会通过 `FrozenConfig.to_train_params()` 正确解析它；正式 loader 与手动 promotion 流程仍需统一。
 
 在该接口完成前，现有固定参数实验仍使用旧格式的 `*_fixed.json`：
 
@@ -471,7 +479,7 @@ $$\hat{\tau}_{\text{PDR}} = \frac{1}{n}\sum_i \left[(2A_i-1)\,q_{A_i}(Z_i,X_i)(Y
 
 - **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO
 - **旧格式固定实验配置**（如 `nmmr_q_v_sgd_fixed.json`）：包含 `data_configs` 和标量化的 `train_params`，当前可传给 `experiment.py`
-- **HPO FrozenConfig 产物**（如 `q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance 和校验哈希；当前尚不能直接传给 `experiment.py --config_path`
+- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和校验哈希；当前尚不能直接传给 `experiment.py --config_path`
 
 | 配置 | 数据集 | 模型 | 损失 |
 |------|--------|------|------|

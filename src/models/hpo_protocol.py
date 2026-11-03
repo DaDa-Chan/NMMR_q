@@ -1,13 +1,16 @@
 """
 HPO protocol orchestration: pilot data roles, the two-round Optuna
-selection process, and the frozen-config artifact.
+selection process, and the candidate-config artifact.
 
-See plan/experiment_1/training_and_hpo_plan.md sections 5.1, 5.2, 6, and
+See plan/experiment_1/training_and_hpo_plan.md sections 5.1, 5.2, 6,
 plan/experiment_1/hpo_selection_plan.md (the more detailed two-round
-version of the same selection process) sections 3-10.
+version of the same selection process) sections 3-10, and
+plan/experiment_1/精简与config管理.md (candidate/frozen-config separation,
+study-identity hardening, and record simplification).
 
-File layout (plan 5.1/6.2, reusing this repo's existing top-level
-conventions rather than a new ad hoc folder):
+File layout -- everything HPO ever writes automatically lives under one
+`results_dir` per search space/run (精简与config管理.md section 3.1); HPO
+code never writes to configs/sgd_frozen/ itself:
     data/pilot/{dgp_version}/scenario_{scenario}/seed_{base_seed}/
                                  select_n{n}.csv, confirm_n{n}.csv,
                                  manifest.json -- sample-size-keyed so
@@ -15,18 +18,25 @@ conventions rather than a new ad hoc folder):
                                  coexist under the same seed_{base_seed}
                                  directory without either overwriting the
                                  other (see ensure_pilot_dataset).
-    configs/sgd_frozen/         {method}_frozen_config.json (one file per
-                                 method; also the only file a formal-
-                                 experiment loader needs -- see
-                                 FrozenConfig.to_train_params)
-    tune_results/               {method}_round1_trials.csv,
+    <results_dir>/              search_config_snapshot.json (single method)
+                                 or search_configs/{method}.json (multiple),
+                                 optuna_studies/{method}_round1.db,
+                                 {method}_round1_trials.csv,
                                  {method}_round2_finalists.csv,
                                  {method}_pilot_confirm_report.json,
-                                 optuna_studies/{method}_round1.db
+                                 candidates/{method}_candidate_config.json
+                                 (written regardless of confirm pass/fail;
+                                 confirm_status/confirm_failure_reasons are
+                                 recorded INSIDE the candidate itself).
+    configs/sgd_frozen/          only ever written to by a human, who
+                                 manually copies a passed candidate here
+                                 once they've checked it (see
+                                 plan section 4.3) -- no function in this
+                                 module writes to this directory.
 
-Callers (and tests) that want output kept out of these real folders should
-pass an explicit directory of their own (e.g. a tempdir) to every function
-below instead of relying on the defaults.
+Callers (and tests) that want output kept out of the real data/pilot or
+tune_results folders should pass an explicit directory of their own (e.g.
+a tempdir) to every function below instead of relying on the defaults.
 """
 import hashlib
 import json
@@ -103,7 +113,13 @@ def pilot_data_dir() -> Path:
 
 
 def frozen_config_dir() -> Path:
-    """Real frozen configs, alongside configs/sgd, configs/rhc."""
+    """
+    Where a USER manually promotes a passed candidate to (精简与config管理.md
+    section 3.2/4.3), alongside configs/sgd, configs/rhc. No function in
+    this module ever writes here -- it exists purely as a path a human
+    copies a candidate_config.json to by hand, after checking
+    confirm_status=="passed" and everything else section 4.3 asks for.
+    """
     return PROJECT_ROOT / "configs" / "sgd_frozen"
 
 
@@ -112,22 +128,61 @@ def tune_results_dir() -> Path:
     return PROJECT_ROOT / "tune_results"
 
 
-def frozen_config_path(method_id: str, base_dir: Optional[Path] = None) -> Path:
-    base = Path(base_dir) if base_dir is not None else frozen_config_dir()
-    return base / f"{_method_slug(method_id)}_frozen_config.json"
-
-
-def provisional_config_path(method_id: str, base_dir: Optional[Path] = None) -> Path:
+def candidate_config_path(method_id: str, base_dir: Optional[Path] = None) -> Path:
     """
-    Intermediate candidate artifact for a method that has NOT (yet) passed
-    pilot-confirm (pilot HPO fix request item 5: "confirm 之前不得把候选保存
-    为正式 frozen config。可以保存带 status=provisional 的中间文件"). Lives
-    under tune_results/ (a run record), never under configs/sgd_frozen/
-    (reserved for the officially confirmed artifact a formal-experiment
-    loader would read).
+    The ONE place HPO ever writes this method's selected candidate --
+    regardless of whether pilot-confirm passed or failed (精简与config管理.md
+    section 4.1: "无论 confirm 通过还是失败，都只将 candidate 保存到当前
+    results_dir/candidates/"). `confirm_status`/`confirm_failure_reasons`
+    inside the saved FrozenConfig distinguish the two outcomes; promoting a
+    passed one to configs/sgd_frozen/ is always a manual, human step.
     """
     base = Path(base_dir) if base_dir is not None else tune_results_dir()
-    return base / f"{_method_slug(method_id)}_provisional_config.json"
+    return base / "candidates" / f"{_method_slug(method_id)}_candidate_config.json"
+
+
+def search_config_snapshot_path(results_dir: Path, method_id: Optional[str] = None) -> Path:
+    """
+    Human-readable copy of the exact search config this run used (section
+    4.2). `method_id=None` -> results_dir/search_config_snapshot.json (a
+    single-method run); otherwise -> results_dir/search_configs/{method}.json
+    (a multi-method run, one snapshot file per method).
+    """
+    results_dir = Path(results_dir)
+    if method_id is None:
+        return results_dir / "search_config_snapshot.json"
+    return results_dir / "search_configs" / f"{_method_slug(method_id)}.json"
+
+
+def ensure_search_config_snapshot(config_bytes: bytes, snapshot_path: Path) -> None:
+    """
+    Write-once, byte-exact provenance snapshot of the search config a
+    `results_dir` was first created against:
+      - snapshot doesn't exist yet -> write `config_bytes` verbatim (no
+        json.load/json.dump round-trip, which would silently reformat the
+        file and defeat the point of a byte-exact snapshot);
+      - snapshot exists and is byte-identical to `config_bytes` -> reuse
+        it, no-op (this is the ordinary "resume this results_dir" case);
+      - snapshot exists but differs -> raise immediately, WITHOUT touching
+        the existing snapshot file and WITHOUT running any HPO for this
+        method. A changed search config reusing an old `results_dir` is
+        exactly the mistake this guards against -- the fix is a new
+        `--results_dir`, not silently overwriting the provenance record of
+        what the old trials in this study were actually searched over.
+    """
+    snapshot_path = Path(snapshot_path)
+    if snapshot_path.exists():
+        existing_bytes = snapshot_path.read_bytes()
+        if existing_bytes == config_bytes:
+            return
+        raise ValueError(
+            f"{snapshot_path} already records a DIFFERENT search config than the one "
+            f"just loaded for this run; refusing to overwrite it or to run any HPO "
+            f"for this method. If the search config genuinely changed, use a new "
+            f"--results_dir instead of reusing this one."
+        )
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_bytes(config_bytes)
 
 
 def optuna_study_db_path(method_id: str, base_dir: Optional[Path] = None) -> Path:
@@ -484,9 +539,19 @@ class FrozenConfig:
     pure_min_round1_trial_number: Optional[int] = None
     # "provisional" until pilot-confirm has run; "confirmed" only once it has
     # passed (pilot HPO fix request item 5/6) -- "failed" if it ran and did
-    # not pass. Only a "confirmed" artifact is ever written to
-    # frozen_config_path(); everything else goes to provisional_config_path().
+    # not pass. Every candidate, regardless of this status, is written to
+    # candidate_config_path() (精简与config管理.md section 4.1) -- promoting
+    # a "confirmed" one to configs/sgd_frozen/ is a manual, human step, not
+    # anything this module does automatically.
     status: str = "provisional"
+    # confirm_status/confirm_failure_reasons mirror decide_pilot_confirm()'s
+    # own "passed"/"failed" + reasons (精简与config管理.md section 4.1: "candidate
+    # 中记录 confirm_status=passed|failed 和失败原因"), kept alongside `status`
+    # (this artifact's own provisional/confirmed/failed lifecycle label) so
+    # the saved candidate file is self-describing without cross-referencing
+    # the separate pilot_confirm_report.json.
+    confirm_status: Optional[str] = None
+    confirm_failure_reasons: List[str] = field(default_factory=list)
 
     def config_hash(self) -> str:
         """Checksum of the frozen artifact (plan 6.2: "最终 frozen config 的校验哈希")."""
@@ -919,8 +984,10 @@ def run_hpo_study_for_method(
     Final selection (section 8): one-SE rule applied to Round 2's richer
       per-candidate score distribution, not Round 1's single-seed score.
 
-    Returns (frozen_config, round1_trial_table, round2_finalists_table).
-    The caller persists these (see save_study_artifacts).
+    Returns (frozen_config, round1_trial_table, round2_finalists_table) --
+    `frozen_config`'s `status` is "provisional" here, before pilot-confirm
+    has run. The caller persists these (see save_pipeline_artifacts, or
+    run_and_confirm_method below for the full pipeline including confirm).
     """
     if method_id not in _METHOD_ID_TO_INT:
         raise ValueError(f"Unknown method_id {method_id!r}; expected one of {METHOD_IDS}")
@@ -987,6 +1054,7 @@ def run_hpo_study_for_method(
         return_study=True,
         storage=storage,
         study_name=study_name,
+        existing_trial_count=existing_trial_count,
     )
     if study is None:
         raise NoFiniteRound1TrialError(
@@ -1064,66 +1132,12 @@ def run_hpo_study_for_method(
     return frozen, round1_table, round2_table
 
 
-def run_four_studies(
-    pilot_select_dataset,
-    pilot_select_data_seed: int,
-    method_configs: Dict[str, Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]],
-    n_splits: int,
-    n_trials: int,
-    base_seed: int,
-    top_k: int = 5,
-    round2_init_seeds: Tuple[int, ...] = DEFAULT_ROUND2_INIT_SEEDS,
-) -> Dict[str, Tuple[FrozenConfig, pd.DataFrame, pd.DataFrame]]:
-    """
-    Run all four methods' independent two-round selections (plan 5.2)
-    against the same pilot_select_dataset. `method_configs` maps method_id
-    -> (data_configs, base_train_params, search_space).
-    """
-    results = {}
-    for method_id in METHOD_IDS:
-        if method_id not in method_configs:
-            continue
-        data_configs, base_train_params, search_space = method_configs[method_id]
-        results[method_id] = run_hpo_study_for_method(
-            method_id=method_id,
-            pilot_select_dataset=pilot_select_dataset,
-            pilot_select_data_seed=pilot_select_data_seed,
-            data_configs=data_configs,
-            base_train_params=base_train_params,
-            search_space=search_space,
-            n_splits=n_splits,
-            n_trials=n_trials,
-            base_seed=base_seed,
-            top_k=top_k,
-            round2_init_seeds=round2_init_seeds,
-        )
-    return results
-
-
-def save_study_artifacts(
-    results: Dict[str, Tuple[FrozenConfig, pd.DataFrame, pd.DataFrame]],
-    config_dir: Optional[Path] = None,
-    results_dir: Optional[Path] = None,
-) -> None:
-    """
-    Persist each method's frozen config (-> `config_dir`, default
-    frozen_config_dir()) and its Round 1/Round 2 tables (-> `results_dir`,
-    default tune_results_dir()). Pass explicit tempdirs instead of the
-    defaults to keep a connectivity/smoke test's output out of the real
-    folders.
-    """
-    (Path(config_dir) if config_dir is not None else frozen_config_dir()).mkdir(parents=True, exist_ok=True)
-    (Path(results_dir) if results_dir is not None else tune_results_dir()).mkdir(parents=True, exist_ok=True)
-    for method_id, (frozen, round1_table, round2_table) in results.items():
-        frozen.save(frozen_config_path(method_id, config_dir))
-        round1_table.to_csv(round1_trials_path(method_id, results_dir), index=False)
-        round2_table.to_csv(round2_finalists_path(method_id, results_dir), index=False)
-
-
 # ---------------------------------------------------------------------------
 # Safe end-to-end orchestration: Round 1 -> Round 2 -> one-SE provisional
-# candidate -> pilot-confirm -> frozen config ONLY if confirm passed
-# (pilot HPO fix request item 5).
+# candidate -> pilot-confirm -> candidate saved either way, confirm_status
+# recorded inside it (精简与config管理.md section 4.1). HPO never writes to
+# configs/sgd_frozen/; scripts/run_pilot_protocol.py loops over `--methods`
+# itself and calls run_and_confirm_method per method.
 # ---------------------------------------------------------------------------
 
 def run_and_confirm_method(
@@ -1149,9 +1163,11 @@ def run_and_confirm_method(
     selection (run_hpo_study_for_method) -> pilot-confirm
     (evaluate_pilot_confirm) -> explicit pass/fail judgment
     (decide_pilot_confirm). The returned `frozen`'s `status` is "confirmed"
-    only if pilot-confirm passed, "failed" otherwise -- `save_pipeline_
-    artifacts` uses this to decide whether the official frozen_config_path
-    may be written at all.
+    only if pilot-confirm passed, "failed" otherwise; `confirm_status`/
+    `confirm_failure_reasons` mirror decide_pilot_confirm()'s own
+    "passed"/"failed" verdict. `save_pipeline_artifacts` always saves this
+    candidate to `candidate_config_path` regardless of which it is --
+    nothing here ever decides to write to configs/sgd_frozen/.
 
     Round 1 stopping with no finite-valued trial (pilot HPO fix round 2
     item 4) propagates as a plain exception from run_hpo_study_for_method --
@@ -1177,7 +1193,12 @@ def run_and_confirm_method(
         report = {"method_id": method_id, "exception": str(e)}
 
     decision = decide_pilot_confirm(report, thresholds)
-    frozen = replace(provisional, status="confirmed" if decision["status"] == "passed" else "failed")
+    frozen = replace(
+        provisional,
+        status="confirmed" if decision["status"] == "passed" else "failed",
+        confirm_status=decision["status"],
+        confirm_failure_reasons=decision["failure_reasons"],
+    )
 
     return {
         "method_id": method_id,
@@ -1190,21 +1211,17 @@ def run_and_confirm_method(
 
 def save_pipeline_artifacts(
     pipeline_results: Dict[str, Dict[str, Any]],
-    config_dir: Optional[Path] = None,
     results_dir: Optional[Path] = None,
 ) -> None:
     """
-    Persist every method's Round 1/Round 2 tables and pilot-confirm report
-    unconditionally (-> `results_dir`). The frozen config is written to the
-    OFFICIAL location (`frozen_config_path`, -> `config_dir`) only when that
-    method's pilot-confirm passed; otherwise the candidate is written to
-    `provisional_config_path` (-> `results_dir`, never `config_dir`) with
-    status="failed", and any pre-existing officially-frozen config for that
-    method is left untouched (pilot HPO fix request item 5).
+    Persist every method's Round 1/Round 2 tables, pilot-confirm report,
+    and candidate config -- all under `results_dir`, unconditionally,
+    regardless of whether that method's pilot-confirm passed or failed
+    (精简与config管理.md section 4.1). There is no `config_dir` parameter:
+    HPO never writes to configs/sgd_frozen/ itself; a human decides which
+    candidate (if any) to copy there by hand (section 4.3).
     """
-    config_dir = Path(config_dir) if config_dir is not None else frozen_config_dir()
     results_dir = Path(results_dir) if results_dir is not None else tune_results_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
 
     for method_id, result in pipeline_results.items():
@@ -1214,16 +1231,16 @@ def save_pipeline_artifacts(
         with open(pilot_confirm_report_path(method_id, results_dir), "w") as f:
             json.dump(result["confirm_report"], f, indent=2, default=str)
 
-        if frozen.status == "confirmed":
-            frozen.save(frozen_config_path(method_id, config_dir))
-            print(f"[{method_id}] pilot-confirm PASSED -> frozen config written to "
-                  f"{frozen_config_path(method_id, config_dir)}")
+        candidate_path = candidate_config_path(method_id, results_dir)
+        frozen.save(candidate_path)
+        if frozen.confirm_status == "passed":
+            print(f"[{method_id}] pilot-confirm PASSED -> candidate saved to {candidate_path}. "
+                  f"Nothing was written to {frozen_config_dir()} -- copy it there yourself "
+                  f"once you've checked it (plan section 4.3).")
         else:
-            frozen.save(provisional_config_path(method_id, results_dir))
             print(f"[{method_id}] pilot-confirm FAILED "
-                  f"(failure_reasons={result['confirm_report'].get('failure_reasons')}); "
-                  f"frozen config NOT written. Provisional candidate saved to "
-                  f"{provisional_config_path(method_id, results_dir)}")
+                  f"(failure_reasons={frozen.confirm_failure_reasons}); "
+                  f"candidate saved to {candidate_path} for inspection, not promoted anywhere.")
 
 
 # ---------------------------------------------------------------------------
