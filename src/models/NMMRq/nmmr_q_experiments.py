@@ -417,10 +417,14 @@ def _run_cross_fitting(data_name:str,
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        log_folder: Optional[Path],
-                       tag: str) -> Tuple[torch.Tensor, List[float], np.ndarray, List[Dict[str, Any]]]:
+                       tag: str,
+                       fold_plan: Optional[List[Tuple[Any, Any]]] = None,
+                       init_seed: Optional[int] = None,
+                       test_dataset: Optional[Any] = None,
+                       ) -> Tuple[torch.Tensor, List[float], np.ndarray, List[Dict[str, Any]], Optional[Dict[str, np.ndarray]]]:
     """
     对任意数据集执行 cross fitting:
-    - 将数据划分为 n_splits 折
+    - 将数据划分为 n_splits 折（除非调用方显式传入 fold_plan，见下）
     - 在每折上训练模型（fold 内部再 8:2 划分 train/val）
     - 在其余折上直接计算 ATE_i，最后求均值
 
@@ -432,9 +436,33 @@ def _run_cross_fitting(data_name:str,
     already frozen from this fold's own gradient-training subset. This is
     what plan 6.1/hpo_selection_plan.md section 9's pilot-confirm diagnostics
     ("矩风险"、"所有折都恢复了最佳模型"、"训练时间") read from.
+
+    Three optional, purely additive parameters (plan/p0_e1_e2/01_shared_protocol.md
+    section 5), all backward-compatible no-ops when omitted:
+
+    - `fold_plan`: an explicit list of (train_idx, eval_idx) pairs. When
+      given, it is used AS-IS -- this function never re-splits internally,
+      so an externally built, A-stratified, H/Q-shared fold plan is
+      respected exactly (精简与config管理.md 同类精神: 不静默回退).
+    - `init_seed`: the base seed each fold's model initialization derives
+      from. When omitted (every existing caller), behavior is byte-for-byte
+      unchanged -- `random_seed` is still used, exactly as before. When
+      given, model initialization no longer depends on `random_seed` (which
+      in every caller is really the fold-SPLIT seed), fixing the
+      split/init-seed conflation plan/p0_e1_e2/00_p0_correctness.md flags.
+    - `test_dataset`: an independent dataset predicted by each fold's model
+      right before it's released. The 5th return value is `None` when this
+      is omitted, or `{"q0_test": ..., "q1_test": ...}` -- the equal-weight
+      average of all `n_splits` folds' test-set predictions -- when given.
     """
     batch_size = train_params['batch_size']
-    cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+    if fold_plan is not None:
+        fold_iterable = list(enumerate(fold_plan, start=1))
+    else:
+        cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+        fold_iterable = list(enumerate(cf_kfold.split(np.arange(len(dataset))), start=1))
+
+    base_init_seed = init_seed if init_seed is not None else random_seed
 
     # 存储全量预测结果 (N, 1)
     dataset_len = len(dataset)
@@ -443,21 +471,23 @@ def _run_cross_fitting(data_name:str,
     fold_predictions: List[torch.Tensor] = []
     ate_values: List[float] = []
     fold_diagnostics: List[Dict[str, Any]] = []
+    test_q0_per_fold: List[np.ndarray] = []
+    test_q1_per_fold: List[np.ndarray] = []
 
-    for fold_idx, (train_idx, eval_idx) in enumerate(cf_kfold.split(np.arange(len(dataset))), start=1):
+    for fold_idx, (train_idx, eval_idx) in fold_iterable:
         print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
-        train_fold_indices = train_idx.tolist()   # 当前折用于训练
-        eval_fold_indices = eval_idx.tolist()   # 剩余样本用于计算 ATE
+        train_fold_indices = list(train_idx)   # 当前折用于训练
+        eval_fold_indices = list(eval_idx)   # 剩余样本用于计算 ATE
 
         fold_folder = None
         if log_folder is not None:
             fold_folder = log_folder / f"fold_{fold_idx}"
             fold_folder.mkdir(parents=True, exist_ok=True)
 
-        # Explicitly derive this fold's init seed from (random_seed, fold_idx) so
+        # Explicitly derive this fold's init seed from (base_init_seed, fold_idx) so
         # model initialization is tied to the fold rather than to however much of
         # the global RNG stream happened to be consumed by earlier folds/trials.
-        fold_init_seed = make_seed_bundle(random_seed, fold_idx).init_seed
+        fold_init_seed = make_seed_bundle(base_init_seed, fold_idx).init_seed
         set_random_seed(fold_init_seed)
 
         trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder, data_name)
@@ -472,28 +502,39 @@ def _run_cross_fitting(data_name:str,
         print(f"  Fold {fold_idx} train result: stop_reason={fold_train_result.stop_reason}, "
               f"best_epoch={fold_train_result.best_epoch}, best_val_score={fold_train_result.best_val_score}")
 
-        eval_view = _build_dataset_view(dataset, eval_fold_indices) 
+        eval_view = _build_dataset_view(dataset, eval_fold_indices)
         fold_ate = trainer.predict(model, eval_view)
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
         print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
-        
+
         with torch.no_grad():
             Z = eval_view.Z.to(trainer.device)
             X = eval_view.X.to(trainer.device)
             A = eval_view.A.to(trainer.device)
             inputs = torch.cat((Z, X), dim=1)
-            
+
             # 分别预测 q(Z,0,X) 和 q(Z,1,X)
             # 注意: 这里的 model 是 NMMR_Q_DualModel
             q0 = model.net0(inputs)
             q1 = model.net1(inputs)
-            
+
             # 根据实际 A 选择 q 值
             q_pred = torch.where(A > 0.5, q1, q0)
-            
+
             # 存入全量数组 (注意索引对应)
             q_preds_full[eval_fold_indices] = q_pred.cpu().numpy()
+
+        if test_dataset is not None:
+            test_view = _build_dataset_view(test_dataset, list(range(len(test_dataset))))
+            with torch.no_grad():
+                Zt = test_view.Z.to(trainer.device)
+                Xt = test_view.X.to(trainer.device)
+                inputs_t = torch.cat((Zt, Xt), dim=1)
+                q0_t = model.net0(inputs_t)
+                q1_t = model.net1(inputs_t)
+            test_q0_per_fold.append(q0_t.cpu().numpy())
+            test_q1_per_fold.append(q1_t.cpu().numpy())
 
         moment_risk, n_eval = _compute_unified_q_score(trainer, model, dataset, eval_fold_indices)
         fold_diagnostics.append({
@@ -518,7 +559,17 @@ def _run_cross_fitting(data_name:str,
 
     ate_tensor = torch.stack(fold_predictions).mean()
     print(f"[CF-{tag}] 平均 ATE(PIPW): {ate_tensor.item():.6f}")
-    return ate_tensor, ate_values, q_preds_full, fold_diagnostics
+
+    test_predictions = None
+    if test_dataset is not None:
+        # Equal-weight average across folds (plan/p0_e1_e2/01_shared_protocol.md
+        # section 5: "由于每个模型训练样本数相同，等权规则预先固定").
+        test_predictions = {
+            "q0_test": np.mean(np.stack(test_q0_per_fold, axis=0), axis=0).reshape(-1),
+            "q1_test": np.mean(np.stack(test_q1_per_fold, axis=0), axis=0).reshape(-1),
+        }
+
+    return ate_tensor, ate_values, q_preds_full, fold_diagnostics, test_predictions
 
 def _run_traditional_prediction(
     dataset,
@@ -627,7 +678,7 @@ def NMMR_Q_experiment(dataset_name: str,
 
     if dataset is not None:
         set_random_seed(init_seed)
-        ate_estimate, ate_values, q_preds, fold_diagnostics = _run_cross_fitting(
+        ate_estimate, ate_values, q_preds, fold_diagnostics, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=dataset,
             n_splits=n_splits,
@@ -664,7 +715,7 @@ def NMMR_Q_experiment(dataset_name: str,
                 df = generate_data(n_samples=n_samples, scenario=scenario, seed=trial_seeds.data_seed)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
                 set_random_seed(trial_seeds.init_seed)
-                ate_estimate, ate_values, _, _ = _run_cross_fitting(
+                ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
                     data_name=dataset_key,
                     dataset=dataset_trial,
                     n_splits=n_splits,
@@ -725,7 +776,7 @@ def NMMR_Q_experiment(dataset_name: str,
 
             print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
             set_random_seed(init_seed)
-            ate_estimate, ate_values, _, _ = _run_cross_fitting(
+            ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
                 data_name=dataset_key,
                 dataset=cf_dataset,
                 n_splits=n_splits,
@@ -755,7 +806,7 @@ def NMMR_Q_experiment(dataset_name: str,
         print(f"     全量数据样本数: {len(full_dataset)}")
 
         set_random_seed(init_seed)
-        ate_estimate, ate_values, _, _ = _run_cross_fitting(
+        ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=full_dataset, # 在全量数据上进行 Cross Fitting
             n_splits=n_splits,

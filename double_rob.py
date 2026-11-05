@@ -12,11 +12,11 @@ project_root = current_dir
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.data.ate.sgd_pv import generate_data
-from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset, BootstrapDataset
+from src.data.ate.data_class import RHCDataset, MergedDataset, BootstrapDataset
 from src.models.NMMRq.nmmr_q_experiments import NMMR_Q_experiment
 from src.models.NMMRh.nmmr_h_experiments import NMMR_H_experiment
 from src.utils import get_device, set_random_seed, make_seed_bundle
+from src.experiments.sgd_experiment_protocol import run_sgd_protocol, ALLOWED_METHODS
 
 def load_config_content(config_path: Path, dataset_name: str):
     """读取 JSON 配置文件内容"""
@@ -53,26 +53,77 @@ def _get_config_path(project_root, dataset_name, model_type,stat_type):
     
     return config_path
 
-def run_double_robust_experiment(dataset_name: str, n_trials: int, n_samples: int = 2000,
-                                  rhc_mode: str = 'repeated'):
+def run_double_robust_experiment(dataset_name: str, n_trials: int, rhc_mode: str = 'repeated'):
+    """RHC path only (精简与config管理.md 之后新的 P0/E1/E2 SGD 路径见
+    run_sgd_protocol_experiment() below -- SGD 和 RHC 的参数集合、职责差异太大，
+    合并进同一个函数签名只会让两边都变得难读)。"""
+    if dataset_name != 'rhc':
+        raise ValueError(
+            f"run_double_robust_experiment only serves dataset_name='rhc'; got {dataset_name!r}. "
+            "SGD now goes through run_sgd_protocol_experiment()."
+        )
     print(f"开始双重稳健性实验")
     print(f"数据集: {dataset_name}")
     print(f"Trials: {n_trials}")
-    if dataset_name == 'rhc':
-        print(f"RHC 模式: {rhc_mode}")
+    print(f"RHC 模式: {rhc_mode}")
 
     device = get_device()
     base_output_path = Path("predicts") / dataset_name / "dr_results"
     base_output_path.mkdir(parents=True, exist_ok=True)
 
     stat = ['u', 'v']
+    _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode)
 
-    if dataset_name == 'sgd':
-        _run_sgd_dr(device, base_output_path, stat, n_trials, n_samples, dataset_name)
-    elif dataset_name == 'rhc':
-        _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode)
-    else:
-        raise ValueError(f"未知的数据集: {dataset_name}")
+
+def run_sgd_protocol_experiment(
+    run_stage: str,
+    scenarios: list,
+    methods: list,
+    sample_sizes: list,
+    repetitions: int,
+    test_size: int,
+    n_splits: int,
+    base_seed: int,
+    h_u_frozen_config: str,
+    h_v_frozen_config: str,
+    q_u_frozen_config: str,
+    q_v_frozen_config: str,
+    output_dir: str,
+):
+    """
+    SGD 的 P0/E1/E2 入口 (plan/p0_e1_e2/01_shared_protocol.md section 9):
+    只读取已通过 confirm 的正式 FrozenConfig，不再读取旧
+    `configs/sgd/.../*_fixed.json`，不内联运行 Optuna。实际的场景、分折、
+    NMMR 调度和结果写入全部在 src/experiments/sgd_experiment_protocol.py
+    (本轮唯一的共用 protocol 实现)。
+
+    不支持断点恢复：`output_dir` 必须是全新的空目录；如果某次运行中断或
+    失败，删除该不完整目录后重新运行（见 README "SGD P0/E1/E2 实验运行规则"）。
+    """
+    print("开始 SGD P0/E1/E2 protocol 实验")
+    print(f"run_stage={run_stage}, scenarios={scenarios}, methods={methods}")
+    print(f"sample_sizes={sample_sizes}, repetitions={repetitions}, test_size={test_size}, n_splits={n_splits}")
+
+    frozen_config_paths = {
+        "H-U": Path(h_u_frozen_config),
+        "H-V": Path(h_v_frozen_config),
+        "Q-U": Path(q_u_frozen_config),
+        "Q-V": Path(q_v_frozen_config),
+    }
+    summary = run_sgd_protocol(
+        run_stage=run_stage,
+        scenario_ids=scenarios,
+        methods=methods,
+        sample_sizes=sample_sizes,
+        repetitions=repetitions,
+        test_size=test_size,
+        n_splits=n_splits,
+        base_seed=base_seed,
+        frozen_config_paths=frozen_config_paths,
+        output_dir=Path(output_dir),
+    )
+    print(f"完成: {summary}")
+    return summary
 
 
 def _compute_pdr(dataset, q_preds, h_preds_dict):
@@ -91,96 +142,6 @@ def _compute_pdr(dataset, q_preds, h_preds_dict):
 
     pdr_individual = term1 + term2
     return np.mean(pdr_individual)
-
-
-def _run_single_trial(dataset_name, dataset, data_cfg_q, train_params_q, data_cfg_h, train_params_h, seeds):
-    """
-    对一个 dataset 运行一次 Q + H + PDR。
-    Q 和 H 共享同一个 split_seed(保证交叉拟合分折一致)，但各自拥有独立派生的
-    init_seed(保证两个网络的初始化互不干扰、互不复用同一段随机数流)。
-    """
-    q_init_seed = make_seed_bundle(seeds.init_seed, 0).init_seed
-    h_init_seed = make_seed_bundle(seeds.init_seed, 1).init_seed
-
-    q_res = NMMR_Q_experiment(
-        dataset_name=dataset_name,
-        data_configs=data_cfg_q,
-        train_params=train_params_q,
-        log_folder=None,
-        random_seed=seeds.split_seed,
-        dataset=dataset,
-        init_seed=q_init_seed,
-    )
-    pipw_val = q_res['PIPW']
-    q_preds = q_res['q_preds']
-
-    h_res = NMMR_H_experiment(
-        dataset_name=dataset_name,
-        data_configs=data_cfg_h,
-        train_params=train_params_h,
-        log_folder=None,
-        random_seed=seeds.split_seed,
-        dataset=dataset,
-        init_seed=h_init_seed,
-    )
-    por_val = h_res['POR']
-    pdr_val = _compute_pdr(dataset, q_preds, h_res['h_preds'])
-
-    return pipw_val, por_val, pdr_val
-
-
-def _run_sgd_dr(device, base_output_path, stat, n_trials, n_samples, dataset_name):
-    """SGD 双重稳健实验：遍历 scenario x stat_type，每次重新生成数据"""
-    scenarios = [1, 2, 3, 4]
-
-    for stat_type in stat:
-        q_config_path = _get_config_path(project_root, dataset_name, "q", stat_type)
-        h_config_path = _get_config_path(project_root, dataset_name, "h", stat_type)
-        print(f"Loading Q Config: {q_config_path.name}")
-        data_cfg_q, train_params_q = load_config_content(q_config_path, dataset_name)
-
-        print(f"Loading H Config: {h_config_path.name}")
-        data_cfg_h, train_params_h = load_config_content(h_config_path, dataset_name)
-
-        loss_name = stat_type
-        for scenario in scenarios:
-            print(f"\n{'='*60}")
-            print(f"Running Scenario {scenario}")
-            print(f"{'='*60}")
-
-            results_list = []
-
-            for i in range(n_trials):
-                # 种子只依赖 (scenario, i)，与 stat_type('u'/'v') 无关，
-                # 保证同一个 trial i 在 U 和 V 两轮里使用完全相同的数据，
-                # 满足"同一重复内所有方法共用数据"的要求。
-                seeds = make_seed_bundle(1000, scenario, i)
-                df = generate_data(n_samples=n_samples, scenario=scenario, seed=seeds.data_seed)
-                dataset = SGDDataset(csv_path='', df=df, device=device)
-
-                pipw_val, por_val, pdr_val = _run_single_trial(
-                    dataset_name, dataset,
-                    data_cfg_q, train_params_q,
-                    data_cfg_h, train_params_h,
-                    seeds
-                )
-
-                results_list.append({
-                    "Trial": i,
-                    "PIPW": pipw_val,
-                    "POR": por_val,
-                    "PDR": pdr_val,
-                    "data_seed": seeds.data_seed,
-                    "split_seed": seeds.split_seed,
-                    "init_seed": seeds.init_seed,
-                })
-
-            df_res = pd.DataFrame(results_list)
-            out_file = base_output_path / f"{loss_name}_s{scenario}.csv"
-            df_res.to_csv(out_file, index=False)
-
-            print(f"结果已保存: {out_file}")
-            print(f"均值 -> PIPW: {df_res['PIPW'].mean():.4f}, POR: {df_res['POR'].mean():.4f}, PDR: {df_res['PDR'].mean():.4f}")
 
 
 def _load_rhc_full_dataset(data_cfg, device):
@@ -309,22 +270,17 @@ def _run_rhc_dr(device, base_output_path, stat, n_trials, dataset_name, rhc_mode
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--dataset_name', 
-        type=str, 
+        '--dataset_name',
+        type=str,
         default='sgd',
-        help="数据集名称，用于寻找配置文件路径 (e.g. sgd)"
+        choices=['sgd', 'rhc'],
+        help="数据集名称: 'sgd' 走新的 P0/E1/E2 共用 protocol, 'rhc' 走未改动的旧路径"
     )
     parser.add_argument(
-        '--trials', 
-        type=int, 
-        default=1,
-        help="重复实验次数"
-    )
-    parser.add_argument(
-        '--n_samples',
+        '--trials',
         type=int,
-        default=2000,
-        help="生成数据的样本数量 (仅 SGD)"
+        default=1,
+        help="重复实验次数 (仅 RHC)"
     )
     parser.add_argument(
         '--rhc_mode',
@@ -333,13 +289,57 @@ if __name__ == "__main__":
         choices=['repeated', 'bootstrap'],
         help="RHC 实验模式: repeated (重复交叉拟合) 或 bootstrap (有放回抽样构造置信区间)"
     )
+    # --- 以下仅用于 --dataset_name sgd (plan/p0_e1_e2/01_shared_protocol.md section 9) ---
+    parser.add_argument('--run_stage', type=str, default='P0', help="P0/E1/E2 (仅 SGD)")
+    parser.add_argument('--scenarios', type=str, default='S1', help="逗号分隔的场景 id, 如 'S1' (仅 SGD)")
+    parser.add_argument(
+        '--methods', type=str, default='nmmr_u,nmmr_v',
+        help=f"逗号分隔的方法, 本轮只支持 {ALLOWED_METHODS} (仅 SGD)"
+    )
+    parser.add_argument('--sample_sizes', type=str, default=None, help="逗号分隔的样本量, 如 '500,1000' (仅 SGD)")
+    parser.add_argument('--repetitions', type=int, default=None, help="重复数 (仅 SGD)")
+    parser.add_argument('--test_size', type=int, default=None, help="独立测试集样本量 (仅 SGD)")
+    parser.add_argument('--n_splits', type=int, default=5, help="cross-fitting 折数 (仅 SGD)")
+    parser.add_argument('--base_seed', type=int, default=None, help="派生所有 repetition seed 的基础种子 (仅 SGD)")
+    parser.add_argument('--h_u_frozen_config', type=str, default='configs/sgd_frozen/h_u_frozen_config.json')
+    parser.add_argument('--h_v_frozen_config', type=str, default='configs/sgd_frozen/h_v_frozen_config.json')
+    parser.add_argument('--q_u_frozen_config', type=str, default='configs/sgd_frozen/q_u_frozen_config.json')
+    parser.add_argument('--q_v_frozen_config', type=str, default='configs/sgd_frozen/q_v_frozen_config.json')
+    parser.add_argument(
+        '--output_dir', type=str, default=None,
+        help="结果输出目录, 如 results/p0_s1_v1 (仅 SGD)。必须是全新的空目录: "
+             "不支持断点恢复, 运行中断或失败后请删除该目录重新运行。"
+    )
 
     args = parser.parse_args()
 
-    run_double_robust_experiment(
-        dataset_name=args.dataset_name,
-        n_trials=args.trials,
-        n_samples=args.n_samples,
-        rhc_mode=args.rhc_mode
-    )
-    
+    if args.dataset_name == 'rhc':
+        run_double_robust_experiment(
+            dataset_name=args.dataset_name,
+            n_trials=args.trials,
+            rhc_mode=args.rhc_mode,
+        )
+    else:
+        missing = [
+            name for name in ('sample_sizes', 'repetitions', 'test_size', 'base_seed', 'output_dir')
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                f"--dataset_name sgd 需要显式指定: {', '.join('--' + m for m in missing)}"
+            )
+        run_sgd_protocol_experiment(
+            run_stage=args.run_stage,
+            scenarios=[s.strip() for s in args.scenarios.split(',') if s.strip()],
+            methods=[m.strip() for m in args.methods.split(',') if m.strip()],
+            sample_sizes=[int(x) for x in args.sample_sizes.split(',') if x.strip()],
+            repetitions=args.repetitions,
+            test_size=args.test_size,
+            n_splits=args.n_splits,
+            base_seed=args.base_seed,
+            h_u_frozen_config=args.h_u_frozen_config,
+            h_v_frozen_config=args.h_v_frozen_config,
+            q_u_frozen_config=args.q_u_frozen_config,
+            q_v_frozen_config=args.q_v_frozen_config,
+            output_dir=args.output_dir,
+        )

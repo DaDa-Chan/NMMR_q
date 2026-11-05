@@ -49,9 +49,14 @@ class ProximalLinearModel:
         Outcome Bridge Function h(W, A, X; b)
         h(W,A,X;b) = b0 + ba*A + bw*W + bx*X
 
+        W/A/X may belong to ANY sample set (this fold's train rows, its eval
+        rows, or the independent test set) -- the row count is taken from
+        the arguments themselves, not from `self.n` (the fold this model
+        was fit on), so this is safe to call for cross-fitting prediction.
         """
         A_mat = A.reshape(-1, 1)
-        feats = np.hstack([self.ones, A_mat, W, X])
+        ones = np.ones((A_mat.shape[0], 1))
+        feats = np.hstack([ones, A_mat, W, X])
         return feats @ b
 
     def q_func(self, t, Z, A, X):
@@ -59,19 +64,26 @@ class ProximalLinearModel:
         Treatment Bridge Function q(Z, A, X; t)
         q(...) = 1 + exp{ (-1)^(1-A) * [t0 + tz*Z + ta*A + tx*X] }
 
+        Same row-count independence as `h_func` -- see its docstring.
         """
         A_mat = A.reshape(-1, 1)
+        ones = np.ones((A_mat.shape[0], 1))
 
-        feats = np.hstack([self.ones, Z, A_mat, X])
+        feats = np.hstack([ones, Z, A_mat, X])
         linear_part = feats @ t
 
-        sign = (2 * A - 1) 
+        sign = (2 * A - 1)
         return 1.0 + np.exp(sign * linear_part)
 
     def solve_h(self):
         """
         求解 h 的参数 b
         Estimating Equation: E_n { [Y - h(W,A,X;b)] * (1, Z, A, X)^T } = 0
+
+        Returns (b_opt, used_lstsq): `used_lstsq` records whether the exact
+        solve was singular and the lstsq fallback was used -- reported as a
+        diagnostic only (plan/p0_e1_e2's Phase "Oracle/参数Proximal" round:
+        "记录是否使用了 lstsq，不要因为条件数较大而自动判失败").
         """
         A_mat = self.A.reshape(-1, 1)
         M = np.hstack([self.ones, self.Z, A_mat, self.X])
@@ -80,29 +92,31 @@ class ProximalLinearModel:
 
         dim_b = V.shape[1]
         dim_eq = M.shape[1]
-        
+
         if dim_b != dim_eq:
             print(f"Warning: h parameters ({dim_b}) != equations ({dim_eq}). System may be over/under-determined.")
 
-        def equations(b):
-            h_val = self.h_func(b, self.W, self.A, self.X)
-            res = self.Y - h_val
-            return M.T @ res / self.n
-
         lhs = M.T @ V
         rhs = M.T @ self.Y
+        used_lstsq = False
         try:
             b_opt = np.linalg.solve(lhs, rhs)
         except np.linalg.LinAlgError:
             b_opt = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
-            
-        return b_opt
+            used_lstsq = True
+
+        return b_opt, used_lstsq
 
     def solve_q(self):
         """
         求解 q 的参数 t
-        Estimating Equation: 
+        Estimating Equation:
         E_n { (-1)^(1-A) * q(Z,A,X;t) * (1,W,A,X)^T - (0, 0_pw, 1, 0_px)^T } = 0
+
+        Returns (t_opt, converged, message, residual_norm): `converged` is
+        the root finder's own success flag (never silently treated as a
+        pass); `residual_norm` is the final moment-equation residual's L2
+        norm, saved as a diagnostic only -- never a pass/fail threshold.
         """
 
         A_mat = self.A.reshape(-1, 1)
@@ -113,18 +127,18 @@ class ProximalLinearModel:
         C[idx_A] = 1.0
 
         dim_t = 1 + self.Z.shape[1] + 1 + self.X.shape[1]
-        
+
         # 定义方程组
         def equations(t):
 
             q_val = self.q_func(t, self.Z, self.A, self.X)
 
             sign = (2 * self.A - 1)
-            
+
             term = (sign * q_val)[:, None] * N_mat
 
             sample_mean = np.mean(term, axis=0)
-            
+
             return sample_mean - C
 
         t0 = np.zeros(dim_t)
@@ -132,13 +146,14 @@ class ProximalLinearModel:
         sol = optimize.root(equations, t0, method='lm')
         if not sol.success:
             print("Warning: q solver did not converge:", sol.message)
-        
-        return sol.x
+
+        residual_norm = float(np.linalg.norm(sol.fun))
+        return sol.x, bool(sol.success), str(sol.message), residual_norm
 
     def estimate_ate(self):
 
-        b_hat = self.solve_h()
-        t_hat = self.solve_q()
+        b_hat, _used_lstsq = self.solve_h()
+        t_hat, _converged, _message, _residual_norm = self.solve_q()
 
         n = self.n
 

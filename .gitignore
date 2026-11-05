@@ -39,3 +39,11 @@ local_tests/
 
 # Large result files (keep summary CSVs)
 results/
+
+tune_results/
+data/pilot/
+server_logs/
+train_results/
+saved_models/
+logs/
+predicts/

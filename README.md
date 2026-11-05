@@ -27,12 +27,9 @@ NMMR_q/
 │   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
 │   │   └── rhc_preprocess.py     #     RHC 数据预处理
 │   └── utils.py                  #   工具函数
-├── scripts/                      # HPO、数据分析与可视化脚本
+├── scripts/                      # HPO 与专项实验脚本
 │   ├── run_pilot_protocol.py     #   SGD HPO 主入口
-│   ├── analysis.py               #   统计分析与假设检验
-│   ├── generate_figures.py       #   生成报告用图表（7 张图 + 统计汇总表）
-│   ├── parse_train.py            #   解析训练结果日志 → CSV
-│   └── parse_tune.py             #   解析调参结果日志 → CSV
+│   └── analyze_rhc_repeated.py   #   RHC repeated-CF 专项分析
 ├── configs/                      # JSON 配置文件
 │   ├── sgd/                      #   SGD 数据集配置（nmmr_q / nmmr_h）
 │   ├── sgd_frozen/               #   人工确认后供正式实验使用的参数产物
@@ -105,7 +102,7 @@ python src/data/ate/sgd_pv.py
 
 ## SGD HPO 调参
 
-服务器环境准备、四种方法的完整命令、产物检查、candidate 晋升和 standalone 使用步骤，见 [HPO 服务器运行与结果使用指南](HPO服务器运行与结果使用指南.md)。
+服务器环境准备、四种方法的完整命令、产物检查、candidate 晋升和 standalone 使用步骤，见本地计划目录中的 [HPO 服务器运行与结果使用指南](plan/hpo/HPO服务器运行与结果使用指南.md)。
 
 ### 1. 入口与支持的方法
 
@@ -479,11 +476,18 @@ standalone 的职责保持精简（精简与config管理.md section 6.6）：只
 
 ### 双稳健估计 (PDR)
 
-`double_rob.py` 同时运行 NMMR-Q 和 NMMR-H，计算 PIPW、POR、PDR 三种估计量：
+`double_rob.py` 是 P0/E1/E2 的共用入口。SGD 走新的共用 protocol
+(`src/experiments/sgd_experiment_protocol.py`)：只读取 `configs/sgd_frozen/`
+下已通过 confirm 的正式 FrozenConfig，不再支持旧的 `*_fixed.json`，也不在内部
+运行 Optuna；目前只实现 `nmmr_u`/`nmmr_v` 两个方法，且只启用 `S1`。RHC 旧流程
+未改动，继续沿用原有命令。
 
 ```bash
-# SGD：100 次试验，每次重新生成数据
-python double_rob.py --dataset_name sgd --trials 100 --n_samples 5000
+# SGD P0 小规模排错（真实命令示例，样本量/重复数按需调整）
+python double_rob.py \
+  --dataset_name sgd --run_stage P0 --scenarios S1 --methods nmmr_u,nmmr_v \
+  --sample_sizes 500,1000 --repetitions 20 --test_size 20000 --n_splits 5 \
+  --base_seed 20261103 --output_dir results/p0_s1_v1
 
 # RHC Bootstrap：有放回抽样，构造 95% 置信区间
 python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
@@ -492,21 +496,23 @@ python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
 python double_rob.py --dataset_name rhc --trials 100 --rhc_mode repeated
 ```
 
-### 数据分析与可视化
+#### SGD P0/E1/E2 实验运行规则：不支持断点恢复
 
-分析脚本位于 `scripts/` 目录，所有路径自动定位到项目根目录，可从任意位置运行：
+每次正式实验必须使用全新、空的 `--output_dir`——protocol 在目录下已有
+`run_config.json` 时会直接拒绝运行（`FileExistsError`），不会尝试续跑或合并
+结果。**如果某次运行中途中断或失败，请删除那个不完整的结果目录，然后用相同
+参数从头重新运行**，不要复用旧目录。
 
-```bash
-# 生成报告用图表（输出到 summary/figures/）
-python scripts/generate_figures.py
+这不等于"一个方法失败就整个实验失败"：单个 `(scenario, n, repetition, method)`
+组合内部失败（训练异常、NaN/Inf 等）会被记录到 `common/failures.csv`，该方法
+的实验正常继续跑完其余方法与重复；只有当运行本身被中断（进程被杀死、机器
+崩溃等）时，才需要删除目录重新运行整个命令。
 
-# 统计分析与假设检验（输出到 figures/）
-python scripts/analysis.py
+### 正式 Monte Carlo 与结果汇总
 
-# 解析训练/调参日志为 CSV
-python scripts/parse_train.py
-python scripts/parse_tune.py
-```
+旧的日志解析和硬编码分析脚本已经删除。正式基础正确性实验将直接输出结构化的
+逐重复/逐折 CSV，再由新的汇总与画图入口读取，不再从终端文本反向解析结果。
+详细实施顺序记录在本地的 `plan/p0_e1_e2/` 中，总计划为 `plan/实验计划.md`。
 
 ## 模型架构
 
@@ -535,11 +541,13 @@ $$\hat{\tau}_{\text{PDR}} = \frac{1}{n}\sum_i \left[(2A_i-1)\,q_{A_i}(Z_i,X_i)(Y
 
 ## 配置文件
 
-当前项目中有三种相关文件：
+SGD 当前使用两类配置：
 
 - **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO；`experiment.py --mode traditional` 的 `--config_path` 也可以复用这类文件，只取其中的 `data_configs`
-- **旧格式固定实验配置**（如 `nmmr_q_v_sgd_fixed.json`）：包含 `data_configs` 和标量化的 `train_params`，可传给 `experiment.py --mode cross_fitting`（默认模式）
-- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；`experiment.py --mode traditional` 通过 `--frozen_config_path` 直接读取这个格式（见第 9 节）
+- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；standalone 已读取该格式，正式 cross-fitting 将由新的共用 protocol 读取。
+
+SGD 的旧 `*_fixed.json` 已删除，不再作为正式配置。RHC 的 legacy fixed 配置暂时
+保留，只服务尚未迁移的 RHC 旧流程。
 
 | 配置 | 数据集 | 模型 | 损失 |
 |------|--------|------|------|

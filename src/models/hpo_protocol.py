@@ -1293,7 +1293,7 @@ def evaluate_pilot_confirm(
 
     if model_kind == "Q":
         from src.models.NMMRq.nmmr_q_experiments import _run_cross_fitting as run_cf
-        ate_estimate, ate_values, q_preds, fold_diagnostics = run_cf(
+        ate_estimate, ate_values, q_preds, fold_diagnostics, _ = run_cf(
             data_name="sgd", dataset=pilot_confirm_dataset, n_splits=frozen_config.n_splits,
             train_params=resolved_train_params, data_configs=data_configs,
             random_seed=frozen_config.split_seed, log_folder=None, tag="pilot_confirm",
@@ -1334,7 +1334,7 @@ def evaluate_pilot_confirm(
             report["q_true_bridge_mse"] = float(np.mean((q_flat - true_q) ** 2))
     else:
         from src.models.NMMRh.nmmr_h_experiments import _run_cross_fitting as run_cf
-        ate_estimate, ate_values, h_preds, fold_diagnostics = run_cf(
+        ate_estimate, ate_values, h_preds, fold_diagnostics, _ = run_cf(
             data_name="sgd", dataset=pilot_confirm_dataset, n_splits=frozen_config.n_splits,
             train_params=resolved_train_params, data_configs=data_configs,
             random_seed=frozen_config.split_seed, log_folder=None, tag="pilot_confirm",

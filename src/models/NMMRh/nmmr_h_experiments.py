@@ -345,7 +345,11 @@ def _run_cross_fitting(data_name:str,
                        data_configs: Dict[str, Any],
                        random_seed: int,
                        log_folder: Optional[Path],
-                       tag: str)  -> Tuple[torch.Tensor, List[float], Dict, List[Dict[str, Any]]]:
+                       tag: str,
+                       fold_plan: Optional[List[Tuple[Any, Any]]] = None,
+                       init_seed: Optional[int] = None,
+                       test_dataset: Optional[Any] = None,
+                       )  -> Tuple[torch.Tensor, List[float], Dict, List[Dict[str, Any]], Optional[Dict[str, np.ndarray]]]:
     """
     Returns a 4th value `fold_diagnostics`: one dict per fold with
     `best_epoch`/`stopped_early`/`stop_reason`/`train_seconds` (from that
@@ -355,35 +359,55 @@ def _run_cross_fitting(data_name:str,
     already frozen from this fold's own gradient-training subset. This is
     what plan 6.1/hpo_selection_plan.md section 9's pilot-confirm diagnostics
     ("矩风险"、"所有折都恢复了最佳模型"、"训练时间") read from.
+
+    Three optional, purely additive parameters (plan/p0_e1_e2/01_shared_protocol.md
+    section 5), all backward-compatible no-ops when omitted -- see the
+    identical ones on NMMRq's `_run_cross_fitting` for the full rationale:
+
+    - `fold_plan`: an explicit list of (train_idx, eval_idx) pairs, used
+      AS-IS when given (never re-split internally).
+    - `init_seed`: the base seed each fold's model initialization derives
+      from; omitted means every existing caller's behavior is unchanged
+      (still derived from `random_seed`).
+    - `test_dataset`: predicted by each fold's model before it's released;
+      the 5th return value is `None` when omitted, or
+      `{"h0_test": ..., "h1_test": ...}` (equal-weight fold average) when given.
     """
     batch_size = train_params['batch_size']
-    cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+    if fold_plan is not None:
+        fold_iterable = list(enumerate(fold_plan, start=1))
+    else:
+        cf_kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed + 1024)
+        fold_iterable = list(enumerate(cf_kfold.split(np.arange(len(dataset))), start=1))
+
+    base_init_seed = init_seed if init_seed is not None else random_seed
 
     fold_predictions: List[torch.Tensor] = []
     ate_values: List[float] = []
     fold_diagnostics: List[Dict[str, Any]] = []
-    
-    indices = np.arange(len(dataset))
+
     dataset_len = len(dataset)
 
     h_fact_full = np.zeros((dataset_len, 1), dtype=np.float32)
     h_1_full = np.zeros((dataset_len, 1), dtype=np.float32)
     h_0_full = np.zeros((dataset_len, 1), dtype=np.float32)
-    
-    for fold_idx, (train_idx_np, eval_idx_np) in enumerate(cf_kfold.split(indices), start=1):
+    test_h1_per_fold: List[np.ndarray] = []
+    test_h0_per_fold: List[np.ndarray] = []
+
+    for fold_idx, (train_idx_np, eval_idx_np) in fold_iterable:
         print(f"\n[CF-{tag}] Fold {fold_idx}/{n_splits}")
-        train_fold_indices = train_idx_np.tolist()
-        eval_fold_indices = eval_idx_np.tolist()
+        train_fold_indices = list(train_idx_np)
+        eval_fold_indices = list(eval_idx_np)
 
         fold_folder = None
         if log_folder is not None:
             fold_folder = log_folder / f"fold_{fold_idx}"
             fold_folder.mkdir(parents=True, exist_ok=True)
 
-        # Explicitly derive this fold's init seed from (random_seed, fold_idx) so
+        # Explicitly derive this fold's init seed from (base_init_seed, fold_idx) so
         # model initialization is tied to the fold rather than to however much of
         # the global RNG stream happened to be consumed by earlier folds/trials.
-        fold_init_seed = make_seed_bundle(random_seed, fold_idx).init_seed
+        fold_init_seed = make_seed_bundle(base_init_seed, fold_idx).init_seed
         set_random_seed(fold_init_seed)
 
         trainer = _create_trainer(data_configs, train_params, random_seed, fold_folder, data_name)
@@ -405,27 +429,39 @@ def _run_cross_fitting(data_name:str,
         fold_predictions.append(fold_ate)
         ate_values.append(fold_ate.item())
         print(f"  Fold {fold_idx} ATE: {fold_ate.item():.4f}")
-        
+
         with torch.no_grad():
             W = eval_view.W.to(trainer.device)
             X = eval_view.X.to(trainer.device)
             A = eval_view.A.to(trainer.device)
-            
+
             # Factual h(A, W, X)
             inputs_fact = torch.cat((A, W, X), dim=1)
             h_fact = model(inputs_fact)
-            
+
             # Counterfactual h(1, W, X)
             inputs_1 = torch.cat((torch.ones_like(A), W, X), dim=1)
             h_1 = model(inputs_1)
-            
+
             # Counterfactual h(0, W, X)
             inputs_0 = torch.cat((torch.zeros_like(A), W, X), dim=1)
             h_0 = model(inputs_0)
-            
+
             h_fact_full[eval_fold_indices] = h_fact.cpu().numpy()
             h_1_full[eval_fold_indices] = h_1.cpu().numpy()
             h_0_full[eval_fold_indices] = h_0.cpu().numpy()
+
+        if test_dataset is not None:
+            test_view = _build_dataset_view(test_dataset, list(range(len(test_dataset))))
+            with torch.no_grad():
+                Wt = test_view.W.to(trainer.device)
+                Xt = test_view.X.to(trainer.device)
+                ones_t = torch.ones((Wt.shape[0], 1), device=trainer.device)
+                zeros_t = torch.zeros((Wt.shape[0], 1), device=trainer.device)
+                h1_t = model(torch.cat((ones_t, Wt, Xt), dim=1))
+                h0_t = model(torch.cat((zeros_t, Wt, Xt), dim=1))
+            test_h1_per_fold.append(h1_t.cpu().numpy())
+            test_h0_per_fold.append(h0_t.cpu().numpy())
 
         moment_risk, n_eval = _compute_unified_h_score(trainer, model, dataset, eval_fold_indices)
         fold_diagnostics.append({
@@ -450,11 +486,21 @@ def _run_cross_fitting(data_name:str,
 
     ate_tensor = torch.stack(fold_predictions).mean()
     print(f"[CF-{tag}] 平均 ATE(POR): {ate_tensor.item():.6f}")
+
+    test_predictions = None
+    if test_dataset is not None:
+        # Equal-weight average across folds (plan/p0_e1_e2/01_shared_protocol.md
+        # section 5: "由于每个模型训练样本数相同，等权规则预先固定").
+        test_predictions = {
+            "h1_test": np.mean(np.stack(test_h1_per_fold, axis=0), axis=0).reshape(-1),
+            "h0_test": np.mean(np.stack(test_h0_per_fold, axis=0), axis=0).reshape(-1),
+        }
+
     return ate_tensor, ate_values, {
         "h_fact": h_fact_full,
         "h_1": h_1_full,
         "h_0": h_0_full
-    }, fold_diagnostics
+    }, fold_diagnostics, test_predictions
 
 def _run_traditional_prediction(
     dataset,
@@ -575,7 +621,7 @@ def NMMR_H_experiment(dataset_name: str,
 
     if dataset is not None:
         set_random_seed(init_seed)
-        ate_estimate, ate_values, h_preds, fold_diagnostics = _run_cross_fitting(
+        ate_estimate, ate_values, h_preds, fold_diagnostics, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=dataset,
             n_splits=n_splits,
@@ -610,7 +656,7 @@ def NMMR_H_experiment(dataset_name: str,
                 df = generate_data(n_samples=n_samples, scenario=scenario, seed=trial_seeds.data_seed)
                 dataset_trial = SGDDataset(csv_path='', df=df, device=device)
                 set_random_seed(trial_seeds.init_seed)
-                ate_estimate, ate_values, _, _ = _run_cross_fitting(
+                ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
                     data_name=dataset_key,
                     dataset=dataset_trial,
                     n_splits=n_splits,
@@ -671,7 +717,7 @@ def NMMR_H_experiment(dataset_name: str,
 
             print("\n===> 在 SGD CF 数据集上执行 cross fitting (使用最优/固定参数)")
             set_random_seed(init_seed)
-            ate_estimate, ate_values, _, _ = _run_cross_fitting(
+            ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
                 data_name=dataset_key,
                 dataset=cf_dataset,
                 n_splits=n_splits,
@@ -703,7 +749,7 @@ def NMMR_H_experiment(dataset_name: str,
         print(f"     全量数据样本数: {len(full_dataset)}")
 
         set_random_seed(init_seed)
-        ate_estimate, ate_values, _, _ = _run_cross_fitting(
+        ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
             data_name=dataset_key,
             dataset=full_dataset,
             n_splits=n_splits,
