@@ -479,15 +479,18 @@ standalone 的职责保持精简（精简与config管理.md section 6.6）：只
 `double_rob.py` 是 P0/E1/E2 的共用入口。SGD 走新的共用 protocol
 (`src/experiments/sgd_experiment_protocol.py`)：只读取 `configs/sgd_frozen/`
 下已通过 confirm 的正式 FrozenConfig，不再支持旧的 `*_fixed.json`，也不在内部
-运行 Optuna；目前只实现 `nmmr_u`/`nmmr_v` 两个方法，且只启用 `S1`。RHC 旧流程
-未改动，继续沿用原有命令。
+运行 Optuna。目前已接入 `oracle`、`parametric_proximal`、`nmmr_u` 和
+`nmmr_v`，且只启用 `S1`；LS、LS-QF 和 2SLS 尚未接入，因此下面命令是当前
+已实现方法的联调命令，不是完整方法矩阵的正式 P0。RHC 旧流程未改动，继续沿用
+原有命令。
 
 ```bash
-# SGD P0 小规模排错（真实命令示例，样本量/重复数按需调整）
+# SGD 当前四种已实现方法的小规模联调（不是完整 P0）
 python double_rob.py \
-  --dataset_name sgd --run_stage P0 --scenarios S1 --methods nmmr_u,nmmr_v \
-  --sample_sizes 500,1000 --repetitions 20 --test_size 20000 --n_splits 5 \
-  --base_seed 20261103 --output_dir results/p0_s1_v1
+  --dataset_name sgd --run_stage P0 --scenarios S1 \
+  --methods oracle,parametric_proximal,nmmr_u,nmmr_v \
+  --sample_sizes 300 --repetitions 1 --test_size 1000 --n_splits 5 \
+  --base_seed 20261103 --output_dir results/p0_s1_smoke_v1
 
 # RHC Bootstrap：有放回抽样，构造 95% 置信区间
 python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap

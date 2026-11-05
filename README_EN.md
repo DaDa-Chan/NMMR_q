@@ -26,11 +26,9 @@ NMMR_q/
 │   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
 │   │   └── rhc_preprocess.py     #     RHC data preprocessing
 │   └── utils.py                  #   Utility functions
-├── scripts/                      # Analysis and visualization scripts
-│   ├── analysis.py               #   Statistical analysis and hypothesis testing
-│   ├── generate_figures.py       #   Generate report figures (7 plots + summary table)
-│   ├── parse_train.py            #   Parse training logs → CSV
-│   └── parse_tune.py             #   Parse tuning logs → CSV
+├── scripts/                      # HPO and focused experiment scripts
+│   ├── run_pilot_protocol.py     #   SGD pilot HPO entry point
+│   └── analyze_rhc_repeated.py   #   Focused RHC repeated-CF analysis
 ├── configs/                      # JSON configuration files
 │   ├── sgd/                      #   SGD dataset configs (nmmr_q / nmmr_h)
 │   └── rhc/                      #   RHC dataset configs (nmmr_q / nmmr_h)
@@ -87,41 +85,34 @@ Place the following files in `data/right_heart_catheterization/`:
 
 ## Experiment Workflow
 
-The project uses a **two-stage workflow**: find optimal hyperparameters via Optuna first, then run formal experiments with fixed parameters.
-
-### Stage 1: Hyperparameter Optimization (HPO)
-
-Use config files with search spaces to find optimal hyperparameters via K-fold cross-validation:
-
-```bash
-python src/experiment.py \
-  --dataset_name sgd \
-  --model_name nmmr_q \
-  --config_path configs/sgd/nmmr_q/nmmr_q_v_sgd.json \
-  --dump_folder results
-```
-
-### Stage 2: Formal Experiments with Fixed Parameters
-
-Copy the best parameters from HPO into `_fixed.json` configs:
-
-```bash
-# Single-model experiments
-python src/experiment.py \
-  --dataset_name sgd \
-  --model_name nmmr_q \
-  --config_path configs/sgd/nmmr_q/nmmr_q_v_sgd_fixed.json \
-  --dump_folder results
-```
+SGD uses a strict separation between pilot HPO and formal experiments. Run
+`scripts/run_pilot_protocol.py`, inspect the candidate, and manually promote each passed
+candidate to `configs/sgd_frozen/`. Formal Monte Carlo runs read those FrozenConfig files
+without running Optuna again. The legacy SGD `*_fixed.json` files have been removed.
 
 ### Doubly Robust Estimation (PDR)
 
-`double_rob.py` runs both NMMR-Q and NMMR-H jointly, computing PIPW, POR, and PDR estimators:
+`double_rob.py` is the shared P0/E1/E2 entry point for H/Q fitting and PIPW, POR, and PDR.
+The current SGD protocol supports `oracle`, `parametric_proximal`, `nmmr_u`, and `nmmr_v`
+under S1. Only NMMR-U/V read the promoted FrozenConfig files. LS, LS-QF, and 2SLS have not
+yet been connected, so the command below is a wiring smoke test rather than the complete P0
+method comparison.
 
 ```bash
-# SGD: 100 trials, each with freshly generated data
-python double_rob.py --dataset_name sgd --trials 100 --n_samples 5000
+python double_rob.py \
+  --dataset_name sgd --run_stage P0 --scenarios S1 \
+  --methods oracle,parametric_proximal,nmmr_u,nmmr_v \
+  --sample_sizes 300 --repetitions 1 --test_size 1000 --n_splits 5 \
+  --base_seed 20261103 --output_dir results/p0_s1_smoke_v1
+```
 
+The SGD protocol does not support resume: every run must use a new output directory. Delete
+an incomplete directory and restart the same command after an interruption. A failure of one
+method is still recorded without stopping the remaining methods and repetitions.
+
+The legacy RHC path remains available:
+
+```bash
 # RHC Bootstrap: resample with replacement for 95% CIs
 python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
 
@@ -129,21 +120,13 @@ python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
 python double_rob.py --dataset_name rhc --trials 100 --rhc_mode repeated
 ```
 
-### Analysis and Visualization
+### Formal Monte Carlo and reporting
 
-Analysis scripts are in the `scripts/` directory. All paths auto-resolve to the project root:
-
-```bash
-# Generate report figures (output to summary/figures/)
-python scripts/generate_figures.py
-
-# Statistical analysis and hypothesis testing (output to figures/)
-python scripts/analysis.py
-
-# Parse training/tuning logs to CSV
-python scripts/parse_train.py
-python scripts/parse_tune.py
-```
+The legacy log parsers and hard-coded analysis scripts have been removed. The formal
+correctness experiment will write structured repetition- and fold-level CSV files directly;
+new summary and plotting entry points will consume those files instead of parsing terminal
+logs. The implementation sequence is recorded locally under `plan/p0_e1_e2/`, with
+`plan/实验计划.md` as the master plan.
 
 ## Model Architecture
 
@@ -172,10 +155,14 @@ Remains consistent when either $q$ or $h$ is correctly specified.
 
 ## Configuration Files
 
-Configs are located under `configs/<dataset>/<model>/` in two types:
+SGD uses two config roles:
 
-- **Search configs** (e.g., `nmmr_q_v_sgd.json`): hyperparameters as dicts with search ranges, for HPO
-- **Fixed configs** (e.g., `nmmr_q_v_sgd_fixed.json`): hyperparameters as scalar values, for formal experiments
+- **Search configs** (e.g., `nmmr_q_v_sgd.json`): search ranges and DGP settings for pilot HPO.
+- **FrozenConfig artifacts** under `configs/sgd_frozen/`: manually promoted, passed HPO
+  candidates for standalone and the formal cross-fitting protocol.
+
+Legacy SGD `*_fixed.json` files are no longer supported. RHC legacy fixed configs remain
+temporarily for the not-yet-migrated RHC path.
 
 | Config pattern | Dataset | Model | Loss |
 |----------------|---------|-------|------|
