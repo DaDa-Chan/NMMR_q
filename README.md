@@ -545,6 +545,40 @@ h1_test,q0_test,q1_test`）；无 variant 的方法用 `{method}.npz`，LS/LS-QF
 (`h_moment_l2/linf`、`q_moment_l2/linf`，固定特征见 `run_config.json` 的
 `prediction_persistence` 字段)，不需要重新训练。
 
+#### SGD P0/E1/E2 结果汇总
+
+```bash
+python scripts/summarize_sgd_results.py --results_dir results/p0_s1_v1
+```
+
+只读取已完成结果目录下的 `run_config.json`、`e1/bridge_results.csv`、
+`e2/effect_results.csv`、`common/failures.csv`（不存在时按零失败处理），生成
+或覆盖：
+
+- `e1/bridge_summary.csv`：按 `run_stage,scenario,n,method,variant` 分组，对
+  成功重复的桥误差、测试矩、Q 分布指标取算术平均；
+- `e2/effect_summary.csv`：按 `run_stage,scenario,n,method,variant,estimator`
+  （`estimator` 为 POR/PIPW/PDR 长表）给出 `mean`、`bias`、`abs_bias`、
+  `sd`（`ddof=1`）、`rmse`、`mcse_bias`，以及成功重复 `total_seconds` 的
+  `median_time`/`p90_time`；
+- `common/time_summary.csv`：按同样的分组给出成功重复的 H/Q 训练与评估耗时
+  均值，以及总耗时的均值/中位数/P90。
+
+简要定义：`Bias = mean(估计) - true_ate`（真 ATE 来自 `scenarios.py` 的
+scenario registry，不是硬编码的 2）；`abs_bias = abs(Bias)`，不是平均绝对
+误差；`SD` 用 `ddof=1` 的样本标准差；`RMSE = sqrt(mean((估计-true_ate)^2))`；
+`MCSE_Bias = SD/sqrt(成功重复数)`；成功重复数 `< 2` 时 `sd`/`mcse_bias` 记为
+NA；`failure_rate = failures/attempts`，失败重复既不计入均值也不记为 0；某
+`(scenario,n,method,variant)` 全部失败时该组仍出现在三张表里，统计量记为
+NA。汇总前会检查每组的 `successes + failures` 是否等于 `run_config.json` 记
+录的 `repetitions`，不满足就直接报错（`IncompleteResultsError`）而不是猜测
+或补算缺失结果——按前面"不支持断点恢复"的规则删除不完整目录重新跑。
+
+汇总程序只读取原始结果，不训练模型、不修改 `run_config.json`/原始 CSV/NPZ
+预测文件；重复执行会直接覆盖旧的三个 summary 文件，不会累加重复行。正式 P0
+仍必须使用全新的 `--output_dir`，汇总程序本身不提供、也不依赖任何训练恢复
+机制。
+
 ### 正式 Monte Carlo 与结果汇总
 
 旧的日志解析和硬编码分析脚本已经删除。正式基础正确性实验将直接输出结构化的
