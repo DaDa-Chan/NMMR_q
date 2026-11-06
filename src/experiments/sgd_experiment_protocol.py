@@ -7,13 +7,19 @@ hierarchy -- "oracle"/"parametric_proximal" need no model object at all,
 "nmmr_u"/"nmmr_v" dispatch against real FrozenConfigs), the pure
 effect/bridge-error computation, and writing the minimal result-file
 structure below. It never tunes hyperparameters -- Optuna runs exclusively
-in scripts/run_pilot_protocol.py. This round adds "oracle" (plan/p0_e1_e2/
-02_methods.md section 2: the S1 scenario registry's own analytical true
-bridges, no fitting at all) and "parametric_proximal" (section 3: the
-correctly-specified linear H / exponential-tilt Q proximal model, fit
-per-fold via the closed-form/moment-equation solvers in
-src/models/LINEAR/linear_model.py). LS/LS-QF/2SLS/RKHS/S2-S4 remain out of
-scope.
+in scripts/run_pilot_protocol.py. Methods implemented so far: "oracle"
+(plan/p0_e1_e2/02_methods.md section 2: the S1 scenario registry's own
+analytical true bridges, no fitting at all), "parametric_proximal"
+(section 3: the correctly-specified linear H / exponential-tilt Q proximal
+model, fit per-fold via the closed-form/moment-equation solvers in
+src/models/LINEAR/linear_model.py), "nmmr_u"/"nmmr_v" (section 4, real
+FrozenConfigs), "ls" (sections 5-6: a naive OLS H/Q baseline that
+always runs as its two pre-defined propensity variants, "oracleP" and
+"cfP", each its own row -- never rewritten as a proximal moment equation),
+and "ls_qf" (same sections, NEXT_IMPLEMENTATION_PROMPT.md: the same
+oracleP/cfP propensity variants and plain-OLS machinery as "ls", but H/Q
+each regress on a fixed 14-column quadratic feature expansion instead of
+the 5-column linear one). 2SLS/RKHS/S2-S4 remain out of scope.
 
 Output layout (plan/p0_e1_e2/01_shared_protocol.md section 7, this round's
 minimal subset only -- *_summary.csv and plots are later-phase work):
@@ -49,12 +55,15 @@ module at all.
 import hashlib
 import json
 import time
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
 from src.data.ate.data_class import SGDDataset
@@ -72,17 +81,27 @@ from .effects import compute_bridge_mae, compute_bridge_mse, compute_effect_scor
 from .scenarios import ScenarioSpec, get_scenario
 
 # This round's explicit method scope: oracle (plan/p0_e1_e2/02_methods.md
-# section 2), parametric_proximal (section 3), and nmmr_u/nmmr_v (section 4,
-# pairing H-U+Q-U / H-V+Q-V). LS/LS-QF/2SLS/RKHS/S2-S4 remain out of scope.
-ALLOWED_METHODS: Tuple[str, ...] = ("oracle", "parametric_proximal", "nmmr_u", "nmmr_v")
+# section 2), parametric_proximal (section 3), nmmr_u/nmmr_v (section 4,
+# pairing H-U+Q-U / H-V+Q-V), ls (section 6, with its two propensity
+# variants -- section 5), and ls_qf (same sections,
+# NEXT_IMPLEMENTATION_PROMPT.md: ls's propensity/OLS machinery with a fixed
+# 14-column quadratic feature set). 2SLS/RKHS/S2-S4 remain out of scope.
+ALLOWED_METHODS: Tuple[str, ...] = ("oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "ls", "ls_qf")
 # Only these methods read a FrozenConfig -- oracle uses the scenario
-# registry's analytical truth, parametric_proximal only ever uses the
-# correct functional FORM (parameters are estimated per fold, never frozen).
+# registry's analytical truth, parametric_proximal/ls/ls_qf only ever use
+# the correct/naive functional FORM (parameters are estimated per fold, never frozen).
 METHODS_REQUIRING_FROZEN_CONFIG: Tuple[str, ...] = ("nmmr_u", "nmmr_v")
 METHOD_FROZEN_IDS: Dict[str, Tuple[str, str]] = {
     "nmmr_u": ("H-U", "Q-U"),
     "nmmr_v": ("H-V", "Q-V"),
 }
+# "ls"/"ls_qf" are each requested as ONE CLI token but always expand into
+# their two pre-defined propensity variants (plan/p0_e1_e2/
+# NEXT_IMPLEMENTATION_PROMPT.md section 3) -- never a single row, never
+# merged into one row. Every other method has no variant (kept as "" throughout).
+LS_VARIANTS: Tuple[str, ...] = ("oracleP", "cfP")
+# Methods that expand into LS_VARIANTS rows rather than a single variant="" row.
+_VARIANT_EXPANDED_METHODS: Tuple[str, ...] = ("ls", "ls_qf")
 
 # Stable integer tags so a (scenario, method, bridge) combination always
 # derives an independent seed, regardless of call order (plan/p0_e1_e2/
@@ -440,6 +459,362 @@ def run_parametric_proximal_method(
 
 
 # ---------------------------------------------------------------------------
+# LS: naive OLS bridge baseline, two propensity variants
+# (plan/p0_e1_e2/02_methods.md sections 5-6). H-LS/Q-LS are plain linear
+# regressions -- NEVER rewritten as ProximalLinearModel's moment equations,
+# and Q's sign is never forced positive.
+# ---------------------------------------------------------------------------
+
+# Pre-specified, fixed-ahead-of-time cfP logistic regression settings
+# (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md section 1: "使用预先固定的
+# sklearn 设置，不运行调参"): unpenalized, lbfgs, a fixed max_iter. Never
+# tuned on real data; never truncated.
+_CFP_MAX_ITER = 1000
+
+
+def _solve_ols(design: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, bool]:
+    """Plain OLS via the normal equations, falling back to lstsq if the
+    design is singular -- same solve/lstsq-fallback convention as
+    ProximalLinearModel.solve_h, reported as a diagnostic only."""
+    lhs = design.T @ design
+    rhs = design.T @ y
+    try:
+        return np.linalg.solve(lhs, rhs), False
+    except np.linalg.LinAlgError:
+        return np.linalg.lstsq(lhs, rhs, rcond=None)[0], True
+
+
+def _predict_ls_linear(b: np.ndarray, col2: np.ndarray, a: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Evaluates b0 + b1*col2 + b2*A + b3*X1 + b4*X2 -- the shared linear
+    form for both H-LS (col2=W) and Q-LS (col2=Z) predictions."""
+    design = np.column_stack([np.ones_like(a), col2, a, x[:, 0], x[:, 1]])
+    return design @ b
+
+
+def _fit_cf_propensity(w: np.ndarray, x: np.ndarray, a: np.ndarray) -> Tuple[np.ndarray, bool]:
+    """
+    cfP (plan/p0_e1_e2/02_methods.md section 5): a fixed, unpenalized
+    logistic regression A ~ (1, W, X1, X2), fit fresh on these rows (this
+    outer fold's OWN training rows, never eval/test). Returns (fitted
+    probabilities on these SAME rows, converged). No probability
+    truncation -- raw predict_proba output, whatever it is.
+    """
+    design = np.column_stack([w, x[:, 0], x[:, 1]])
+    clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=_CFP_MAX_ITER)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        clf.fit(design, a)
+    converged = not any(issubclass(w_.category, ConvergenceWarning) for w_ in caught)
+    pi = clf.predict_proba(design)[:, 1]
+    return pi, converged
+
+
+def run_ls_method(
+    train_dataset: Any,
+    test_dataset: Any,
+    fold_plan: FoldPlan,
+    scenario: ScenarioSpec,
+    variant: str,
+) -> Dict[str, Any]:
+    """
+    H-LS regresses Y on (1,W,A,X1,X2); Q-LS first builds the propensity-
+    reweighted pseudo-outcome R_i = {A_i*pi_i + (1-A_i)*(1-pi_i)}^-1 on this
+    fold's OWN training rows, then regresses R on (1,Z,A,X1,X2) -- both
+    plain OLS. `variant` picks which propensity feeds R:
+
+    - "oracleP": `scenario.true_propensity` (the S1 analytical truth).
+    - "cfP": `_fit_cf_propensity`, refit fresh per fold on that fold's train
+      rows only.
+
+    A fold whose cfP logistic regression does not converge raises here
+    (caught by the caller as this method's failure) -- never silently
+    accepted. Q's predicted sign is never forced positive.
+    """
+    if variant not in LS_VARIANTS:
+        raise ValueError(f"Unknown ls variant {variant!r}; expected one of {LS_VARIANTS}.")
+
+    train_df = train_dataset.data
+    test_df = test_dataset.data
+    n_train = len(train_dataset)
+    n_test = len(test_dataset)
+
+    h_observed_oof = np.full(n_train, np.nan)
+    h0_oof = np.full(n_train, np.nan)
+    h1_oof = np.full(n_train, np.nan)
+    q_observed_oof = np.full(n_train, np.nan)
+
+    test_W = test_df['W'].values
+    test_Z = test_df['Z'].values
+    test_X = test_df[['X1', 'X2']].values
+    test_ones_a = np.ones(n_test)
+    test_zeros_a = np.zeros(n_test)
+    test_h0_per_fold: List[np.ndarray] = []
+    test_h1_per_fold: List[np.ndarray] = []
+    test_q0_per_fold: List[np.ndarray] = []
+    test_q1_per_fold: List[np.ndarray] = []
+
+    fold_diagnostics_h: List[Dict[str, Any]] = []
+    fold_diagnostics_q: List[Dict[str, Any]] = []
+
+    for fold_id, (train_idx, eval_idx) in enumerate(fold_plan.splits, start=1):
+        fold_train = train_df.iloc[train_idx]
+        fold_eval = train_df.iloc[eval_idx]
+
+        train_W = fold_train['W'].values
+        train_Z = fold_train['Z'].values
+        train_X = fold_train[['X1', 'X2']].values
+        train_A = fold_train['A'].values
+        train_Y = fold_train['Y'].values
+
+        # --- H-LS: plain OLS, no propensity involved at all ---
+        h_start = time.monotonic()
+        design_h = np.column_stack([np.ones(len(train_idx)), train_W, train_A, train_X[:, 0], train_X[:, 1]])
+        b_hat, used_lstsq_h = _solve_ols(design_h, train_Y)
+        h_seconds = time.monotonic() - h_start
+
+        # --- Q phase: propensity (oracleP analytic lookup / cfP fit) + R
+        # construction + Q-LS OLS, timed as ONE block so propensity time
+        # is never miscounted into evaluation_seconds (it's part of Q-LS's
+        # own fitting, not post-fit prediction). ---
+        q_start = time.monotonic()
+        if variant == "oracleP":
+            pi_train = scenario.true_propensity(train_W, train_X)
+        else:
+            pi_train, propensity_converged = _fit_cf_propensity(train_W, train_X, train_A)
+            if not propensity_converged:
+                raise RuntimeError(f"Fold {fold_id}'s cfP logistic regression did not converge.")
+
+        R_train = 1.0 / (train_A * pi_train + (1.0 - train_A) * (1.0 - pi_train))
+        design_q = np.column_stack([np.ones(len(train_idx)), train_Z, train_A, train_X[:, 0], train_X[:, 1]])
+        t_hat, used_lstsq_q = _solve_ols(design_q, R_train)
+        q_seconds = time.monotonic() - q_start
+
+        eval_W = fold_eval['W'].values
+        eval_Z = fold_eval['Z'].values
+        eval_X = fold_eval[['X1', 'X2']].values
+        eval_A = fold_eval['A'].values
+        eval_ones_a = np.ones(len(eval_idx))
+        eval_zeros_a = np.zeros(len(eval_idx))
+
+        h_observed_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_A, eval_X)
+        h0_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_zeros_a, eval_X)
+        h1_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_ones_a, eval_X)
+        q_observed_oof[eval_idx] = _predict_ls_linear(t_hat, eval_Z, eval_A, eval_X)
+
+        test_h0_per_fold.append(_predict_ls_linear(b_hat, test_W, test_zeros_a, test_X))
+        test_h1_per_fold.append(_predict_ls_linear(b_hat, test_W, test_ones_a, test_X))
+        test_q0_per_fold.append(_predict_ls_linear(t_hat, test_Z, test_zeros_a, test_X))
+        test_q1_per_fold.append(_predict_ls_linear(t_hat, test_Z, test_ones_a, test_X))
+
+        fold_diagnostics_h.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(b_hat))),
+            "used_lstsq": bool(used_lstsq_h),
+            "train_seconds": h_seconds,
+            "propensity_min": None,
+            "propensity_max": None,
+        })
+        fold_diagnostics_q.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(t_hat))),
+            "used_lstsq": bool(used_lstsq_q),
+            "train_seconds": q_seconds,
+            "propensity_min": float(np.min(pi_train)),
+            "propensity_max": float(np.max(pi_train)),
+        })
+
+    return {
+        "h_observed_oof": h_observed_oof,
+        "h0_oof": h0_oof,
+        "h1_oof": h1_oof,
+        "q_observed_oof": q_observed_oof,
+        "h0_test": np.mean(np.stack(test_h0_per_fold, axis=0), axis=0),
+        "h1_test": np.mean(np.stack(test_h1_per_fold, axis=0), axis=0),
+        "q0_test": np.mean(np.stack(test_q0_per_fold, axis=0), axis=0),
+        "q1_test": np.mean(np.stack(test_q1_per_fold, axis=0), axis=0),
+        "fold_diagnostics_h": fold_diagnostics_h,
+        "fold_diagnostics_q": fold_diagnostics_q,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LS-QF: same propensity/OLS machinery as LS, but H/Q each regress on a
+# fixed 14-column quadratic feature expansion instead of the 5-column
+# linear one (plan/p0_e1_e2/02_methods.md section 7 /
+# NEXT_IMPLEMENTATION_PROMPT.md section 1). H-LS-QF uses (W,A,X1,X2);
+# Q-LS-QF uses (Z,A,X1,X2) on the SAME propensity-reweighted pseudo-outcome
+# R as LS. Never A^2 (binary A has A^2==A); never a repeated interaction.
+# ---------------------------------------------------------------------------
+
+def ls_qf_feature_names(p_label: str) -> Tuple[str, ...]:
+    """The fixed 14-column order for generic input (P,A,X1,X2), with `P`
+    named "W" for H-LS-QF or "Z" for Q-LS-QF -- same order every caller
+    (train/eval/test, forced A=0/1) must use."""
+    return (
+        "1", p_label, "A", "X1", "X2",
+        f"{p_label}^2", "X1^2", "X2^2",
+        f"{p_label}*A", f"{p_label}*X1", f"{p_label}*X2",
+        "A*X1", "A*X2",
+        "X1*X2",
+    )
+
+
+LS_QF_H_FEATURE_NAMES: Tuple[str, ...] = ls_qf_feature_names("W")
+LS_QF_Q_FEATURE_NAMES: Tuple[str, ...] = ls_qf_feature_names("Z")
+
+
+def _ls_qf_design(p: np.ndarray, a: np.ndarray, x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
+    """Builds the 14 columns in the exact order `ls_qf_feature_names`
+    documents: 1, P, A, X1, X2, P^2, X1^2, X2^2, P*A, P*X1, P*X2, A*X1,
+    A*X2, X1*X2. No standardization, feature selection, or regularization."""
+    ones = np.ones_like(p)
+    return np.column_stack([
+        ones, p, a, x1, x2,
+        p ** 2, x1 ** 2, x2 ** 2,
+        p * a, p * x1, p * x2,
+        a * x1, a * x2,
+        x1 * x2,
+    ])
+
+
+def run_ls_qf_method(
+    train_dataset: Any,
+    test_dataset: Any,
+    fold_plan: FoldPlan,
+    scenario: ScenarioSpec,
+    variant: str,
+) -> Dict[str, Any]:
+    """
+    Same cross-fitting recipe, propensity, and OLS solver as `run_ls_method`
+    -- H-LS-QF regresses Y on the fixed 14-column quadratic expansion of
+    (W,A,X1,X2); Q-LS-QF builds the SAME propensity-reweighted pseudo-
+    outcome R_i = {A_i*pi_i + (1-A_i)*(1-pi_i)}^-1 on this fold's own
+    training rows, then regresses R on the 14-column expansion of
+    (Z,A,X1,X2). `variant` picks which propensity feeds R, exactly as in
+    `run_ls_method`:
+
+    - "oracleP": `scenario.true_propensity` (the S1 analytical truth).
+    - "cfP": `_fit_cf_propensity`, refit fresh per fold on that fold's train
+      rows only.
+
+    Reuses `_fit_cf_propensity`/`scenario.true_propensity`/`_solve_ols`
+    unchanged -- never a second propensity or OLS implementation. A fold
+    whose cfP logistic regression does not converge raises here (caught by
+    the caller as this method's failure). Q's predicted sign is never
+    forced positive.
+    """
+    if variant not in LS_VARIANTS:
+        raise ValueError(f"Unknown ls_qf variant {variant!r}; expected one of {LS_VARIANTS}.")
+
+    train_df = train_dataset.data
+    test_df = test_dataset.data
+    n_train = len(train_dataset)
+    n_test = len(test_dataset)
+
+    h_observed_oof = np.full(n_train, np.nan)
+    h0_oof = np.full(n_train, np.nan)
+    h1_oof = np.full(n_train, np.nan)
+    q_observed_oof = np.full(n_train, np.nan)
+
+    test_W = test_df['W'].values
+    test_Z = test_df['Z'].values
+    test_X1 = test_df['X1'].values
+    test_X2 = test_df['X2'].values
+    test_ones_a = np.ones(n_test)
+    test_zeros_a = np.zeros(n_test)
+    test_h0_per_fold: List[np.ndarray] = []
+    test_h1_per_fold: List[np.ndarray] = []
+    test_q0_per_fold: List[np.ndarray] = []
+    test_q1_per_fold: List[np.ndarray] = []
+
+    fold_diagnostics_h: List[Dict[str, Any]] = []
+    fold_diagnostics_q: List[Dict[str, Any]] = []
+
+    for fold_id, (train_idx, eval_idx) in enumerate(fold_plan.splits, start=1):
+        fold_train = train_df.iloc[train_idx]
+        fold_eval = train_df.iloc[eval_idx]
+
+        train_W = fold_train['W'].values
+        train_Z = fold_train['Z'].values
+        train_X1 = fold_train['X1'].values
+        train_X2 = fold_train['X2'].values
+        train_A = fold_train['A'].values
+        train_Y = fold_train['Y'].values
+        train_X = fold_train[['X1', 'X2']].values
+
+        # --- H-LS-QF: 14-column quadratic OLS, no propensity involved ---
+        h_start = time.monotonic()
+        design_h = _ls_qf_design(train_W, train_A, train_X1, train_X2)
+        b_hat, used_lstsq_h = _solve_ols(design_h, train_Y)
+        h_seconds = time.monotonic() - h_start
+
+        # --- Q phase: propensity (oracleP analytic lookup / cfP fit) + R
+        # construction + Q-LS-QF OLS, timed as ONE block, same convention as
+        # run_ls_method so propensity time is never miscounted into
+        # evaluation_seconds. ---
+        q_start = time.monotonic()
+        if variant == "oracleP":
+            pi_train = scenario.true_propensity(train_W, train_X)
+        else:
+            pi_train, propensity_converged = _fit_cf_propensity(train_W, train_X, train_A)
+            if not propensity_converged:
+                raise RuntimeError(f"Fold {fold_id}'s cfP logistic regression did not converge.")
+
+        R_train = 1.0 / (train_A * pi_train + (1.0 - train_A) * (1.0 - pi_train))
+        design_q = _ls_qf_design(train_Z, train_A, train_X1, train_X2)
+        t_hat, used_lstsq_q = _solve_ols(design_q, R_train)
+        q_seconds = time.monotonic() - q_start
+
+        eval_W = fold_eval['W'].values
+        eval_Z = fold_eval['Z'].values
+        eval_X1 = fold_eval['X1'].values
+        eval_X2 = fold_eval['X2'].values
+        eval_A = fold_eval['A'].values
+        eval_ones_a = np.ones(len(eval_idx))
+        eval_zeros_a = np.zeros(len(eval_idx))
+
+        h_observed_oof[eval_idx] = _ls_qf_design(eval_W, eval_A, eval_X1, eval_X2) @ b_hat
+        h0_oof[eval_idx] = _ls_qf_design(eval_W, eval_zeros_a, eval_X1, eval_X2) @ b_hat
+        h1_oof[eval_idx] = _ls_qf_design(eval_W, eval_ones_a, eval_X1, eval_X2) @ b_hat
+        q_observed_oof[eval_idx] = _ls_qf_design(eval_Z, eval_A, eval_X1, eval_X2) @ t_hat
+
+        test_h0_per_fold.append(_ls_qf_design(test_W, test_zeros_a, test_X1, test_X2) @ b_hat)
+        test_h1_per_fold.append(_ls_qf_design(test_W, test_ones_a, test_X1, test_X2) @ b_hat)
+        test_q0_per_fold.append(_ls_qf_design(test_Z, test_zeros_a, test_X1, test_X2) @ t_hat)
+        test_q1_per_fold.append(_ls_qf_design(test_Z, test_ones_a, test_X1, test_X2) @ t_hat)
+
+        fold_diagnostics_h.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(b_hat))),
+            "used_lstsq": bool(used_lstsq_h),
+            "train_seconds": h_seconds,
+            "propensity_min": None,
+            "propensity_max": None,
+        })
+        fold_diagnostics_q.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(t_hat))),
+            "used_lstsq": bool(used_lstsq_q),
+            "train_seconds": q_seconds,
+            "propensity_min": float(np.min(pi_train)),
+            "propensity_max": float(np.max(pi_train)),
+        })
+
+    return {
+        "h_observed_oof": h_observed_oof,
+        "h0_oof": h0_oof,
+        "h1_oof": h1_oof,
+        "q_observed_oof": q_observed_oof,
+        "h0_test": np.mean(np.stack(test_h0_per_fold, axis=0), axis=0),
+        "h1_test": np.mean(np.stack(test_h1_per_fold, axis=0), axis=0),
+        "q0_test": np.mean(np.stack(test_q0_per_fold, axis=0), axis=0),
+        "q1_test": np.mean(np.stack(test_q1_per_fold, axis=0), axis=0),
+        "fold_diagnostics_h": fold_diagnostics_h,
+        "fold_diagnostics_q": fold_diagnostics_q,
+    }
+
+
+# ---------------------------------------------------------------------------
 # NMMR-U/V dispatch
 # ---------------------------------------------------------------------------
 
@@ -512,6 +887,7 @@ _FOLD_DIAG_COLUMNS: Tuple[str, ...] = (
     "method_id", "bridge_type", "fold_id",
     "best_epoch", "stop_reason", "held_out_moment_risk", "train_seconds", "best_state_restored",
     "solve_success", "used_lstsq", "moment_residual_norm",
+    "propensity_min", "propensity_max",
 )
 
 
@@ -526,6 +902,7 @@ def _make_fold_diag_row(method_id: str, bridge_type: str, fold_id: int, **kwargs
 
 def compute_method_results(
     method: str,
+    variant: str,
     train_dataset: Any,
     test_dataset: Any,
     fold_plan: FoldPlan,
@@ -535,18 +912,20 @@ def compute_method_results(
     scenario: ScenarioSpec,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
     """
-    One method's bridge-error row (E1), effect row (E2), and per-fold
-    training-diagnostic rows for one repetition, computed from a single H/Q
-    fit (plan/p0_e1_e2/plan.md section 2: "一次拟合，同时服务 E1 与 E2").
-    `h_train_params`/`q_train_params` are only used (and only required) for
-    "nmmr_u"/"nmmr_v"; `oracle` and `parametric_proximal` ignore them (no
-    frozen config involved at all).
+    One (method, variant)'s bridge-error row (E1), effect row (E2), and
+    per-fold training-diagnostic rows for one repetition, computed from a
+    single H/Q fit (plan/p0_e1_e2/plan.md section 2: "一次拟合，同时服务
+    E1 与 E2"). `h_train_params`/`q_train_params` are only used (and only
+    required) for "nmmr_u"/"nmmr_v"; every other method ignores them (no
+    frozen config involved at all). `variant` is only meaningful for
+    "ls"/"ls_qf" ("oracleP"/"cfP"); every other method ignores it.
 
     Raises `NonFiniteResultError` (Phase 1.1 item 5) if any required result
     -- OOF/test predictions, POR/PIPW/PDR, bridge MSE, (NMMR only) held-out
     moment risk -- is not finite; the caller records that as a failure
     instead of writing a row. A parametric_proximal fold whose Q solver
-    does not converge raises in `run_parametric_proximal_method` itself,
+    does not converge, or an ls/ls_qf cfP fold whose propensity logistic
+    regression does not converge, raises in its own run_*_method function,
     caught the same way. h_train_seconds/q_train_seconds (summed from each
     bridge's own fold_diagnostics -- 0 for oracle, which has none) and
     evaluation_seconds (everything else) are purely diagnostic and never
@@ -557,6 +936,10 @@ def compute_method_results(
         preds = run_oracle_method(train_dataset, test_dataset, scenario)
     elif method == "parametric_proximal":
         preds = run_parametric_proximal_method(train_dataset, test_dataset, fold_plan)
+    elif method == "ls":
+        preds = run_ls_method(train_dataset, test_dataset, fold_plan, scenario, variant)
+    elif method == "ls_qf":
+        preds = run_ls_qf_method(train_dataset, test_dataset, fold_plan, scenario, variant)
     elif method in ("nmmr_u", "nmmr_v"):
         preds = run_nmmr_method(
             method, train_dataset, test_dataset, fold_plan, rep_seeds, h_train_params, q_train_params,
@@ -659,6 +1042,15 @@ def compute_method_results(
                     solve_success=d["solve_success"], train_seconds=d["train_seconds"],
                     used_lstsq=d["used_lstsq"], moment_residual_norm=d["moment_residual_norm"],
                 ))
+    elif method in ("ls", "ls_qf"):
+        for bridge_type, diags in (("H", preds["fold_diagnostics_h"]), ("Q", preds["fold_diagnostics_q"])):
+            for d in diags:
+                fold_diag_rows.append(_make_fold_diag_row(
+                    method_id=method, bridge_type=bridge_type, fold_id=d["fold_id"],
+                    solve_success=d["solve_success"], train_seconds=d["train_seconds"],
+                    used_lstsq=d["used_lstsq"],
+                    propensity_min=d["propensity_min"], propensity_max=d["propensity_max"],
+                ))
     # oracle: no fold diagnostics at all (plan asks that it not write fake
     # best_epoch/stop_reason/training records).
 
@@ -682,7 +1074,7 @@ def build_run_config(
     base_seed: int,
     frozen_config_hashes: Dict[str, str],
 ) -> Dict[str, Any]:
-    return {
+    config: Dict[str, Any] = {
         "run_stage": run_stage,
         "scenarios": list(scenario_ids),
         "methods": list(methods),
@@ -694,6 +1086,32 @@ def build_run_config(
         "frozen_config_hashes": dict(sorted(frozen_config_hashes.items())),
         "software_version": _get_git_commit(),
     }
+    if "ls" in methods:
+        # Fixed-ahead-of-time cfP settings (plan/p0_e1_e2/
+        # NEXT_IMPLEMENTATION_PROMPT.md section 1) recorded here purely for
+        # reproducibility -- never tuned on real data, and not exposed as a
+        # CLI flag.
+        config["ls_settings"] = {
+            "variants": list(LS_VARIANTS),
+            "cfP_solver": "lbfgs",
+            "cfP_penalty": None,
+            "cfP_max_iter": _CFP_MAX_ITER,
+            "propensity_clipping": None,
+        }
+    if "ls_qf" in methods:
+        # Same fixed-ahead-of-time cfP settings as "ls", plus the fixed
+        # 14-column quadratic feature order for H/Q (NEXT_IMPLEMENTATION_
+        # PROMPT.md section 4) -- reproducibility only, not a CLI flag.
+        config["ls_qf_settings"] = {
+            "variants": list(LS_VARIANTS),
+            "h_feature_names": list(LS_QF_H_FEATURE_NAMES),
+            "q_feature_names": list(LS_QF_Q_FEATURE_NAMES),
+            "cfP_solver": "lbfgs",
+            "cfP_penalty": None,
+            "cfP_max_iter": _CFP_MAX_ITER,
+            "propensity_clipping": None,
+        }
+    return config
 
 
 def ensure_run_config(output_dir: Path, run_config: Dict[str, Any]) -> None:
@@ -758,8 +1176,18 @@ def run_sgd_protocol(
     if unknown_methods:
         raise ValueError(
             f"This round only supports methods {ALLOWED_METHODS}; got unsupported "
-            f"{unknown_methods}. LS/LS-QF/2SLS/RKHS are not implemented yet."
+            f"{unknown_methods}. 2SLS/RKHS are not implemented yet."
         )
+    # "ls"/"ls_qf" each always expand into BOTH their pre-defined propensity
+    # variants as separate (method, variant) run specs -- never one merged
+    # row, never just one variant (NEXT_IMPLEMENTATION_PROMPT.md section 3).
+    # Every other method keeps variant="".
+    run_specs: List[Tuple[str, str]] = []
+    for method in methods:
+        if method in _VARIANT_EXPANDED_METHODS:
+            run_specs.extend((method, variant) for variant in LS_VARIANTS)
+        else:
+            run_specs.append((method, ""))
 
     # Resolve every requested scenario up front (raises immediately for an
     # unknown/disabled one -- never buried as a per-repetition failure row).
@@ -809,13 +1237,13 @@ def run_sgd_protocol(
                 try:
                     fold_plan = build_fold_plan(train_dataset, n_splits, rep_seeds.split_seed)
                 except ValueError as exc:
-                    summary["attempted"] += len(methods)
-                    summary["failed"] += len(methods)
+                    summary["attempted"] += len(run_specs)
+                    summary["failed"] += len(run_specs)
                     _append_rows(failures_csv, [{
                         "run_stage": run_stage, "scenario": scenario_id, "n": n, "repetition": repetition,
-                        "method": method, "variant": "", "failure_stage": "fold_plan",
+                        "method": method, "variant": variant, "failure_stage": "fold_plan",
                         "failure_reason": f"{type(exc).__name__}: {exc}",
-                    } for method in methods])
+                    } for method, variant in run_specs])
                     continue
 
                 _append_rows(repetitions_csv, [{
@@ -830,7 +1258,7 @@ def run_sgd_protocol(
                     for r in fold_plan.records
                 ])
 
-                for method in methods:
+                for method, variant in run_specs:
                     summary["attempted"] += 1
                     h_train_params = q_train_params = None
                     if method in METHODS_REQUIRING_FROZEN_CONFIG:
@@ -839,11 +1267,11 @@ def run_sgd_protocol(
                         _, q_train_params = frozen_configs[q_id]
                     key_row = {
                         "run_stage": run_stage, "scenario": scenario_id, "n": n,
-                        "repetition": repetition, "method": method, "variant": "",
+                        "repetition": repetition, "method": method, "variant": variant,
                     }
                     try:
                         bridge_row, effect_row, fold_diag_rows = compute_method_results(
-                            method, train_dataset, test_dataset, fold_plan, rep_seeds,
+                            method, variant, train_dataset, test_dataset, fold_plan, rep_seeds,
                             h_train_params, q_train_params, scenario,
                         )
                     except Exception as exc:  # noqa: BLE001 -- deliberate: one method's failure must not stop the rest.
@@ -859,6 +1287,7 @@ def run_sgd_protocol(
                     _append_rows(fold_diagnostics_csv, [
                         {
                             "scenario_id": scenario_id, "repetition": repetition, "sample_size": n,
+                            "variant": variant,
                             **row,
                         }
                         for row in fold_diag_rows

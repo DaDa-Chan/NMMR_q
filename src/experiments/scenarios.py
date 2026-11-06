@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
+from scipy.special import expit
 
 from src.data.ate.sgd_pv import generate_data
 from src.models.hpo_protocol import _true_h0_scenario1, _true_q0_scenario1
@@ -40,7 +41,9 @@ class ScenarioSpec:
     registry's, so this module stays free of a torch/device dependency.
     `true_h(w, a, x)`/`true_q(z, a, x)` take numpy arrays (any constant `a`
     level broadcastable against `w`/`z`) and return the analytical bridge
-    value. Both are `None` for a disabled scenario.
+    value. `true_propensity(w, x)` (plan/p0_e1_e2/02_methods.md section 5,
+    the `oracleP` LS variant's propensity) returns the analytical P(A=1|W,X).
+    All three are `None` for a disabled scenario.
     """
     scenario_id: str
     enabled: bool
@@ -48,6 +51,7 @@ class ScenarioSpec:
     generate_test: Optional[Callable[[int, int], pd.DataFrame]]
     true_h: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]]
     true_q: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]]
+    true_propensity: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]]
     true_ate: Optional[float]
     representation_metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -68,6 +72,12 @@ def _s1_true_q(z: np.ndarray, a: np.ndarray, x: np.ndarray) -> np.ndarray:
     return _true_q0_scenario1(z, x, a)
 
 
+def _s1_true_propensity(w: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """pi_0(w,x) = expit(-0.0390625 + 0.125*w - 0.15625*x1 - 0.15625*x2)
+    (plan/p0_e1_e2/02_methods.md section 5: LS's `oracleP` variant)."""
+    return expit(-0.0390625 + 0.125 * w - 0.15625 * x[:, 0] - 0.15625 * x[:, 1])
+
+
 def _make_disabled_scenario_error(scenario_id: str) -> Callable[..., Any]:
     def _raise(*_args: Any, **_kwargs: Any) -> Any:
         raise NotImplementedError(
@@ -85,6 +95,7 @@ def _disabled_scenario(scenario_id: str, representation_metadata: Dict[str, Any]
     return ScenarioSpec(
         scenario_id=scenario_id, enabled=False,
         generate_train=raiser, generate_test=raiser, true_h=raiser, true_q=raiser,
+        true_propensity=raiser,
         true_ate=None, representation_metadata=representation_metadata,
     )
 
@@ -93,7 +104,8 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
     "S1": ScenarioSpec(
         scenario_id="S1", enabled=True,
         generate_train=_s1_generate, generate_test=_s1_generate,
-        true_h=_s1_true_h, true_q=_s1_true_q, true_ate=S1_TRUE_ATE,
+        true_h=_s1_true_h, true_q=_s1_true_q, true_propensity=_s1_true_propensity,
+        true_ate=S1_TRUE_ATE,
         representation_metadata={"w_transform": "identity", "z_transform": "identity"},
     ),
     "S2": _disabled_scenario("S2", {"w_transform": "invertible_nonlinear(frozen pending)", "z_transform": "identity"}),
