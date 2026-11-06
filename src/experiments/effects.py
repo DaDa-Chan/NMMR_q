@@ -82,6 +82,72 @@ def compute_bridge_mae(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.mean(np.abs(pred - true)))
 
 
+H_MOMENT_FEATURE_NAMES: tuple = ("1", "Z", "A", "X1", "X2")
+Q_MOMENT_FEATURE_NAMES: tuple = ("1", "W", "X1", "X2")
+
+
+def compute_h_test_moments(
+    y: np.ndarray, a: np.ndarray, z: np.ndarray, x1: np.ndarray, x2: np.ndarray,
+    h0: np.ndarray, h1: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Fixed, finite-dimensional H test moment (plan/p0_e1_e2/
+    NEXT_IMPLEMENTATION_PROMPT.md section 3): on the independent test set,
+    `h_hat_A = A*h1 + (1-A)*h0` (the H bridge evaluated at each sample's
+    OWN observed treatment), `r_H = Y - h_hat_A`, `g_H = (1,Z,A,X1,X2)`
+    (`H_MOMENT_FEATURE_NAMES`), `m_H = mean(r_H * g_H)` (elementwise over
+    samples, a 5-vector). No new tunable parameter -- never a kernel, never
+    a weak-instrument-style threshold; diagnostic only, never a failure gate.
+    """
+    y = np.asarray(y, dtype=float).reshape(-1)
+    a = np.asarray(a, dtype=float).reshape(-1)
+    z = np.asarray(z, dtype=float).reshape(-1)
+    x1 = np.asarray(x1, dtype=float).reshape(-1)
+    x2 = np.asarray(x2, dtype=float).reshape(-1)
+    h0 = np.asarray(h0, dtype=float).reshape(-1)
+    h1 = np.asarray(h1, dtype=float).reshape(-1)
+
+    h_a = a * h1 + (1.0 - a) * h0
+    r_h = y - h_a
+    g_h = np.column_stack([np.ones_like(a), z, a, x1, x2])
+    m_h = np.mean(r_h[:, None] * g_h, axis=0)
+    return {
+        "h_moment_l2": float(np.linalg.norm(m_h, ord=2)),
+        "h_moment_linf": float(np.max(np.abs(m_h))),
+    }
+
+
+def compute_q_test_moments(
+    a: np.ndarray, w: np.ndarray, x1: np.ndarray, x2: np.ndarray, q0: np.ndarray, q1: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Fixed, finite-dimensional Q test moment (plan/p0_e1_e2/
+    NEXT_IMPLEMENTATION_PROMPT.md section 3): for each forced treatment
+    level `a_level` in {0,1}, `r_{Q,a} = I(A==a_level)*q_a - 1`, `g_Q =
+    (1,W,X1,X2)` (`Q_MOMENT_FEATURE_NAMES`), `m_{Q,a} = mean(r_{Q,a}*g_Q)`
+    (a 4-vector each); `m_Q` concatenates `m_{Q,0}` then `m_{Q,1}` into one
+    8-vector. No new tunable parameter; diagnostic only, never a failure gate.
+    """
+    a = np.asarray(a, dtype=float).reshape(-1)
+    w = np.asarray(w, dtype=float).reshape(-1)
+    x1 = np.asarray(x1, dtype=float).reshape(-1)
+    x2 = np.asarray(x2, dtype=float).reshape(-1)
+    q0 = np.asarray(q0, dtype=float).reshape(-1)
+    q1 = np.asarray(q1, dtype=float).reshape(-1)
+
+    g_q = np.column_stack([np.ones_like(a), w, x1, x2])
+    moments = []
+    for a_level, q_a in ((0.0, q0), (1.0, q1)):
+        indicator = (a == a_level).astype(float)
+        r_q = indicator * q_a - 1.0
+        moments.append(np.mean(r_q[:, None] * g_q, axis=0))
+    m_q = np.concatenate(moments)
+    return {
+        "q_moment_l2": float(np.linalg.norm(m_q, ord=2)),
+        "q_moment_linf": float(np.max(np.abs(m_q))),
+    }
+
+
 def compute_q_distribution_diagnostics(q_values: np.ndarray) -> Dict[str, float]:
     """Minimal Q diagnostics (plan/p0_e1_e2/05_reporting.md section 1):
     min/p50/p90/p95/p99/max and the fraction of non-positive predictions.

@@ -23,7 +23,12 @@ the 5-column linear one), and "2sls" (section 8: two-stage least squares --
 H's endogenous W is instrumented by Z, Q's endogenous Z (on the same
 propensity-reweighted R as ls/ls_qf) is instrumented by W; eval/test bridge
 predictions always use the ACTUAL W/Z, never the first-stage fitted
-values). RKHS/S2-S4 remain out of scope.
+values). RKHS/S2-S4 remain out of scope. This round additionally persists
+the minimal inputs/predictions needed to recompute POR/PIPW/PDR and the
+independent-test-set bridge moments from saved files alone (never
+retrained), and adds two fixed, finite-dimensional test moments (`effects.
+compute_h_test_moments`/`compute_q_test_moments`) -- kernel moment risk,
+formal Monte Carlo, and summary/plotting remain out of scope.
 
 Output layout (plan/p0_e1_e2/01_shared_protocol.md section 7, this round's
 minimal subset only -- *_summary.csv and plots are later-phase work):
@@ -33,13 +38,25 @@ minimal subset only -- *_summary.csv and plots are later-phase work):
     ├── common/
     │   ├── repetitions.csv
     │   ├── folds.csv
-    │   ├── fold_diagnostics.csv   (per-fold H/Q training diagnostics)
-    │   └── failures.csv
+    │   ├── fold_diagnostics.csv       (per-fold H/Q training diagnostics)
+    │   ├── failures.csv
+    │   └── prediction_inputs/
+    │       └── {scenario}_n{n}_rep{repetition:04d}.npz
+    │           (train/test Y,A,Z,W,X1,X2 -- ONE per (scenario,n,repetition),
+    │           shared by every method; never the DataFrame, model weights,
+    │           U, epoch logs, or GPU/CPU info)
+    ├── predictions/{scenario}/n{n}/rep{repetition:04d}/
+    │   ├── {method}.npz               (no-variant methods)
+    │   └── {method}__{variant}.npz    (ls/ls_qf/2sls's oracleP/cfP)
+    │       (h_observed_oof, h0_oof, h1_oof, q_observed_oof, h0_test,
+    │       h1_test, q0_test, q1_test -- ONE per successful
+    │       (scenario,n,repetition,method,variant); a failed method never
+    │       gets one)
     ├── e1/
-    │   └── bridge_results.csv
+    │   └── bridge_results.csv         (also carries h/q_moment_l2/linf)
     └── e2/
-        └── effect_results.csv     (also carries h/q_train_seconds,
-                                     evaluation_seconds, total_seconds)
+        └── effect_results.csv         (also carries h/q_train_seconds,
+                                         evaluation_seconds, total_seconds)
 
 No resume/checkpoint support: `ensure_run_config` refuses to run into an
 `output_dir` that already has a `run_config.json`, so every real run must
@@ -81,7 +98,16 @@ from src.models.hpo_protocol import (
 )
 from src.utils import get_device, make_seed_bundle
 
-from .effects import compute_bridge_mae, compute_bridge_mse, compute_effect_scores, compute_q_distribution_diagnostics
+from .effects import (
+    H_MOMENT_FEATURE_NAMES,
+    Q_MOMENT_FEATURE_NAMES,
+    compute_bridge_mae,
+    compute_bridge_mse,
+    compute_effect_scores,
+    compute_h_test_moments,
+    compute_q_distribution_diagnostics,
+    compute_q_test_moments,
+)
 from .scenarios import ScenarioSpec, get_scenario
 
 # This round's explicit method scope: oracle (plan/p0_e1_e2/02_methods.md
@@ -1093,15 +1119,19 @@ def compute_method_results(
     h_train_params: Dict[str, Any],
     q_train_params: Dict[str, Any],
     scenario: ScenarioSpec,
-) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Dict[str, np.ndarray]]:
     """
-    One (method, variant)'s bridge-error row (E1), effect row (E2), and
-    per-fold training-diagnostic rows for one repetition, computed from a
-    single H/Q fit (plan/p0_e1_e2/plan.md section 2: "一次拟合，同时服务
-    E1 与 E2"). `h_train_params`/`q_train_params` are only used (and only
-    required) for "nmmr_u"/"nmmr_v"; every other method ignores them (no
-    frozen config involved at all). `variant` is only meaningful for
-    "ls"/"ls_qf"/"2sls" ("oracleP"/"cfP"); every other method ignores it.
+    One (method, variant)'s bridge-error row (E1), effect row (E2),
+    per-fold training-diagnostic rows, and the raw OOF/test prediction
+    arrays (for the caller to persist as that repetition's prediction
+    payload, plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md section 2 -- this
+    function/the run_*_method functions never write a result file
+    themselves) for one repetition, computed from a single H/Q fit
+    (plan/p0_e1_e2/plan.md section 2: "一次拟合，同时服务 E1 与 E2").
+    `h_train_params`/`q_train_params` are only used (and only required) for
+    "nmmr_u"/"nmmr_v"; every other method ignores them (no frozen config
+    involved at all). `variant` is only meaningful for "ls"/"ls_qf"/"2sls"
+    ("oracleP"/"cfP"); every other method ignores it.
 
     Raises `NonFiniteResultError` (Phase 1.1 item 5) if any required result
     -- OOF/test predictions, POR/PIPW/PDR, bridge MSE, (NMMR only) held-out
@@ -1157,6 +1187,8 @@ def compute_method_results(
     _require_finite("tau_pdr", effect["tau_pdr"])
 
     n_test = len(test_dataset)
+    test_y = test_dataset.Y.detach().cpu().numpy().reshape(-1)
+    test_a = test_dataset.A.detach().cpu().numpy().reshape(-1)
     test_w = test_dataset.W.detach().cpu().numpy().reshape(-1)
     test_z = test_dataset.Z.detach().cpu().numpy().reshape(-1)
     test_x = test_dataset.X.detach().cpu().numpy()
@@ -1180,6 +1212,18 @@ def compute_method_results(
     q_mae_a1 = compute_bridge_mae(preds["q1_test"], true_q1)
 
     q_diag = compute_q_distribution_diagnostics(np.concatenate([preds["q0_test"], preds["q1_test"]]))
+
+    # Fixed, finite-dimensional independent-test-set moments (plan/p0_e1_e2/
+    # NEXT_IMPLEMENTATION_PROMPT.md section 3) -- diagnostic only, never a
+    # failure gate (no threshold is applied to them below).
+    h_moments = compute_h_test_moments(
+        y=test_y, a=test_a, z=test_z, x1=test_x[:, 0], x2=test_x[:, 1],
+        h0=preds["h0_test"], h1=preds["h1_test"],
+    )
+    q_moments = compute_q_test_moments(
+        a=test_a, w=test_w, x1=test_x[:, 0], x2=test_x[:, 1],
+        q0=preds["q0_test"], q1=preds["q1_test"],
+    )
     t_eval_done = time.monotonic()
 
     h_train_seconds = float(sum(d["train_seconds"] for d in preds["fold_diagnostics_h"]))
@@ -1201,6 +1245,7 @@ def compute_method_results(
         "h_mae_a0": h_mae_a0, "h_mae_a1": h_mae_a1, "h_mae": (h_mae_a0 + h_mae_a1) / 2.0,
         "q_mse_a0": q_mse_a0, "q_mse_a1": q_mse_a1, "q_mse": (q_mse_a0 + q_mse_a1) / 2.0,
         "q_mae_a0": q_mae_a0, "q_mae_a1": q_mae_a1, "q_mae": (q_mae_a0 + q_mae_a1) / 2.0,
+        **h_moments, **q_moments,
         **q_diag,
     }
     effect_row = {
@@ -1249,7 +1294,22 @@ def compute_method_results(
     # oracle: no fold diagnostics at all (plan asks that it not write fake
     # best_epoch/stop_reason/training records).
 
-    return bridge_row, effect_row, fold_diag_rows
+    # Exactly the 8 arrays NEXT_IMPLEMENTATION_PROMPT.md section 2 asks to
+    # persist per (scenario,n,repetition,method,variant) -- plain numpy
+    # arrays from THIS already-completed fit, never retrained to produce
+    # them, and never model weights/epoch logs.
+    prediction_payload: Dict[str, np.ndarray] = {
+        "h_observed_oof": np.asarray(preds["h_observed_oof"], dtype=float),
+        "h0_oof": np.asarray(preds["h0_oof"], dtype=float),
+        "h1_oof": np.asarray(preds["h1_oof"], dtype=float),
+        "q_observed_oof": np.asarray(preds["q_observed_oof"], dtype=float),
+        "h0_test": np.asarray(preds["h0_test"], dtype=float),
+        "h1_test": np.asarray(preds["h1_test"], dtype=float),
+        "q0_test": np.asarray(preds["q0_test"], dtype=float),
+        "q1_test": np.asarray(preds["q1_test"], dtype=float),
+    }
+
+    return bridge_row, effect_row, fold_diag_rows, prediction_payload
 
 
 # ---------------------------------------------------------------------------
@@ -1257,6 +1317,28 @@ def compute_method_results(
 # support (see run_sgd_protocol's docstring) -- every real run starts from
 # a brand-new, empty output_dir.
 # ---------------------------------------------------------------------------
+
+# Prediction-persistence path templates (plan/p0_e1_e2/
+# NEXT_IMPLEMENTATION_PROMPT.md section 1-2 / 01_shared_protocol.md section
+# 7) -- recorded into run_config.json verbatim, purely as documentation.
+_PREDICTION_INPUTS_PATH_TEMPLATE = "common/prediction_inputs/{scenario}_n{n}_rep{repetition:04d}.npz"
+_PREDICTIONS_PATH_TEMPLATE_NO_VARIANT = "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}.npz"
+_PREDICTIONS_PATH_TEMPLATE_WITH_VARIANT = "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}__{variant}.npz"
+
+
+def _prediction_inputs_path(output_dir: Path, scenario_id: str, n: int, repetition: int) -> Path:
+    return Path(output_dir) / _PREDICTION_INPUTS_PATH_TEMPLATE.format(
+        scenario=scenario_id, n=n, repetition=repetition,
+    )
+
+
+def _predictions_path(output_dir: Path, scenario_id: str, n: int, repetition: int, method: str, variant: str) -> Path:
+    if variant:
+        template = _PREDICTIONS_PATH_TEMPLATE_WITH_VARIANT
+    else:
+        template = _PREDICTIONS_PATH_TEMPLATE_NO_VARIANT
+    return Path(output_dir) / template.format(scenario=scenario_id, n=n, repetition=repetition, method=method, variant=variant)
+
 
 def build_run_config(
     run_stage: str,
@@ -1280,6 +1362,20 @@ def build_run_config(
         "base_seed": base_seed,
         "frozen_config_hashes": dict(sorted(frozen_config_hashes.items())),
         "software_version": _get_git_commit(),
+        # Recomputability record (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md
+        # sections 1-3, 5): every (scenario,n,repetition) saves one common
+        # train/test input npz, every successful (scenario,n,repetition,
+        # method,variant) saves one OOF/test prediction npz, and the test
+        # moments below use these fixed feature orders -- never a tunable
+        # knob, never model weights/epoch logs.
+        "prediction_persistence": {
+            "format": "numpy.savez_compressed",
+            "common_inputs_path_template": _PREDICTION_INPUTS_PATH_TEMPLATE,
+            "predictions_path_template_no_variant": _PREDICTIONS_PATH_TEMPLATE_NO_VARIANT,
+            "predictions_path_template_with_variant": _PREDICTIONS_PATH_TEMPLATE_WITH_VARIANT,
+            "h_moment_features": list(H_MOMENT_FEATURE_NAMES),
+            "q_moment_features_per_treatment_level": list(Q_MOMENT_FEATURE_NAMES),
+        },
     }
     if "ls" in methods:
         # Fixed-ahead-of-time cfP settings (plan/p0_e1_e2/
@@ -1467,6 +1563,24 @@ def run_sgd_protocol(
                     for r in fold_plan.records
                 ])
 
+                # Common train/test input arrays (plan/p0_e1_e2/
+                # NEXT_IMPLEMENTATION_PROMPT.md section 1) -- saved ONCE per
+                # (scenario,n,repetition), shared by every method's
+                # predictions; only after the fold plan succeeds. Never the
+                # DataFrame object, model weights, U, epoch logs, or
+                # GPU/CPU info.
+                inputs_path = _prediction_inputs_path(output_dir, scenario_id, n, repetition)
+                inputs_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    inputs_path,
+                    train_y=train_df['Y'].values, train_a=train_df['A'].values,
+                    train_z=train_df['Z'].values, train_w=train_df['W'].values,
+                    train_x1=train_df['X1'].values, train_x2=train_df['X2'].values,
+                    test_y=test_df['Y'].values, test_a=test_df['A'].values,
+                    test_z=test_df['Z'].values, test_w=test_df['W'].values,
+                    test_x1=test_df['X1'].values, test_x2=test_df['X2'].values,
+                )
+
                 for method, variant in run_specs:
                     summary["attempted"] += 1
                     h_train_params = q_train_params = None
@@ -1479,7 +1593,7 @@ def run_sgd_protocol(
                         "repetition": repetition, "method": method, "variant": variant,
                     }
                     try:
-                        bridge_row, effect_row, fold_diag_rows = compute_method_results(
+                        bridge_row, effect_row, fold_diag_rows, prediction_payload = compute_method_results(
                             method, variant, train_dataset, test_dataset, fold_plan, rep_seeds,
                             h_train_params, q_train_params, scenario,
                         )
@@ -1501,5 +1615,12 @@ def run_sgd_protocol(
                         }
                         for row in fold_diag_rows
                     ])
+                    # Persist this already-completed fit's OOF/test
+                    # predictions (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md
+                    # section 2) -- a failed method above never reaches this
+                    # point, so it never gets a predictions file.
+                    predictions_path = _predictions_path(output_dir, scenario_id, n, repetition, method, variant)
+                    predictions_path.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez_compressed(predictions_path, **prediction_payload)
 
     return summary

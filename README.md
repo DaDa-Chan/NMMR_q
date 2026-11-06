@@ -511,6 +511,40 @@ python double_rob.py --dataset_name rhc --trials 100 --rhc_mode repeated
 的实验正常继续跑完其余方法与重复；只有当运行本身被中断（进程被杀死、机器
 崩溃等）时，才需要删除目录重新运行整个命令。
 
+#### SGD P0/E1/E2 输出文件
+
+```text
+results/<output_dir>/
+├── run_config.json
+├── common/
+│   ├── repetitions.csv
+│   ├── folds.csv
+│   ├── fold_diagnostics.csv
+│   ├── failures.csv
+│   └── prediction_inputs/
+│       └── {scenario}_n{n}_rep{repetition:04d}.npz
+├── predictions/{scenario}/n{n}/rep{repetition:04d}/
+│   ├── {method}.npz
+│   └── {method}__{variant}.npz
+├── e1/
+│   └── bridge_results.csv
+└── e2/
+    └── effect_results.csv
+```
+
+`common/prediction_inputs/` 每个 `(scenario,n,repetition)` 只保存一次共同的
+train/test 输入（`train_y,train_a,train_z,train_w,train_x1,train_x2` 和对应
+的 `test_*`），所有方法共用，只在 fold plan 成功建立后保存一次。
+`predictions/` 下每个成功的 `(scenario,n,repetition,method,variant)` 保存一
+份压缩 OOF/测试预测（`h_observed_oof,h0_oof,h1_oof,q_observed_oof,h0_test,
+h1_test,q0_test,q1_test`）；无 variant 的方法用 `{method}.npz`，LS/LS-QF/2SLS
+用 `{method}__{variant}.npz`。两类文件都用 `numpy.savez_compressed`，不保存
+模型权重、DataFrame object、pickle object、`U`、逐 epoch 日志或 GPU/CPU 信
+息；方法失败时不生成它的预测文件，但不影响其他方法。只用这两类 npz 文件就能
+重算 POR/PIPW/PDR 和 `bridge_results.csv` 里的 H/Q 有限维测试矩
+(`h_moment_l2/linf`、`q_moment_l2/linf`，固定特征见 `run_config.json` 的
+`prediction_persistence` 字段)，不需要重新训练。
+
 ### 正式 Monte Carlo 与结果汇总
 
 旧的日志解析和硬编码分析脚本已经删除。正式基础正确性实验将直接输出结构化的
