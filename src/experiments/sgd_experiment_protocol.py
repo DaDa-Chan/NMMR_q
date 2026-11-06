@@ -16,10 +16,14 @@ src/models/LINEAR/linear_model.py), "nmmr_u"/"nmmr_v" (section 4, real
 FrozenConfigs), "ls" (sections 5-6: a naive OLS H/Q baseline that
 always runs as its two pre-defined propensity variants, "oracleP" and
 "cfP", each its own row -- never rewritten as a proximal moment equation),
-and "ls_qf" (same sections, NEXT_IMPLEMENTATION_PROMPT.md: the same
+"ls_qf" (same sections, NEXT_IMPLEMENTATION_PROMPT.md: the same
 oracleP/cfP propensity variants and plain-OLS machinery as "ls", but H/Q
 each regress on a fixed 14-column quadratic feature expansion instead of
-the 5-column linear one). 2SLS/RKHS/S2-S4 remain out of scope.
+the 5-column linear one), and "2sls" (section 8: two-stage least squares --
+H's endogenous W is instrumented by Z, Q's endogenous Z (on the same
+propensity-reweighted R as ls/ls_qf) is instrumented by W; eval/test bridge
+predictions always use the ACTUAL W/Z, never the first-stage fitted
+values). RKHS/S2-S4 remain out of scope.
 
 Output layout (plan/p0_e1_e2/01_shared_protocol.md section 7, this round's
 minimal subset only -- *_summary.csv and plots are later-phase work):
@@ -83,25 +87,27 @@ from .scenarios import ScenarioSpec, get_scenario
 # This round's explicit method scope: oracle (plan/p0_e1_e2/02_methods.md
 # section 2), parametric_proximal (section 3), nmmr_u/nmmr_v (section 4,
 # pairing H-U+Q-U / H-V+Q-V), ls (section 6, with its two propensity
-# variants -- section 5), and ls_qf (same sections,
+# variants -- section 5), ls_qf (same sections,
 # NEXT_IMPLEMENTATION_PROMPT.md: ls's propensity/OLS machinery with a fixed
-# 14-column quadratic feature set). 2SLS/RKHS/S2-S4 remain out of scope.
-ALLOWED_METHODS: Tuple[str, ...] = ("oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "ls", "ls_qf")
+# 14-column quadratic feature set), and 2sls (section 8: two-stage least
+# squares reusing that same propensity/OLS machinery). RKHS/S2-S4 remain
+# out of scope.
+ALLOWED_METHODS: Tuple[str, ...] = ("oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "ls", "ls_qf", "2sls")
 # Only these methods read a FrozenConfig -- oracle uses the scenario
-# registry's analytical truth, parametric_proximal/ls/ls_qf only ever use
-# the correct/naive functional FORM (parameters are estimated per fold, never frozen).
+# registry's analytical truth, parametric_proximal/ls/ls_qf/2sls only ever
+# use the correct/naive functional FORM (parameters are estimated per fold, never frozen).
 METHODS_REQUIRING_FROZEN_CONFIG: Tuple[str, ...] = ("nmmr_u", "nmmr_v")
 METHOD_FROZEN_IDS: Dict[str, Tuple[str, str]] = {
     "nmmr_u": ("H-U", "Q-U"),
     "nmmr_v": ("H-V", "Q-V"),
 }
-# "ls"/"ls_qf" are each requested as ONE CLI token but always expand into
-# their two pre-defined propensity variants (plan/p0_e1_e2/
-# NEXT_IMPLEMENTATION_PROMPT.md section 3) -- never a single row, never
+# "ls"/"ls_qf"/"2sls" are each requested as ONE CLI token but always expand
+# into their two pre-defined propensity variants (plan/p0_e1_e2/
+# NEXT_IMPLEMENTATION_PROMPT.md section 3/4) -- never a single row, never
 # merged into one row. Every other method has no variant (kept as "" throughout).
 LS_VARIANTS: Tuple[str, ...] = ("oracleP", "cfP")
 # Methods that expand into LS_VARIANTS rows rather than a single variant="" row.
-_VARIANT_EXPANDED_METHODS: Tuple[str, ...] = ("ls", "ls_qf")
+_VARIANT_EXPANDED_METHODS: Tuple[str, ...] = ("ls", "ls_qf", "2sls")
 
 # Stable integer tags so a (scenario, method, bridge) combination always
 # derives an independent seed, regardless of call order (plan/p0_e1_e2/
@@ -815,6 +821,182 @@ def run_ls_qf_method(
 
 
 # ---------------------------------------------------------------------------
+# 2SLS: two-stage least squares, reusing LS/LS-QF's propensity and OLS
+# machinery (plan/p0_e1_e2/02_methods.md section 8 /
+# NEXT_IMPLEMENTATION_PROMPT.md). H-2SLS instruments endogenous W with Z;
+# Q-2SLS instruments endogenous Z (on the same propensity-reweighted R as
+# LS/LS-QF) with W. Both share exogenous (A,X1,X2). eval/test bridge
+# predictions always plug in the ACTUAL W/Z -- never a first-stage fitted
+# value, which is used ONLY to build that fold's own second-stage design.
+# ---------------------------------------------------------------------------
+
+def _solve_2sls(
+    y: np.ndarray, endog: np.ndarray, instrument: np.ndarray, a: np.ndarray, x1: np.ndarray, x2: np.ndarray,
+) -> Tuple[np.ndarray, bool, float]:
+    """
+    First stage: `endog ~ (1, instrument, A, X1, X2)` via `_solve_ols`,
+    giving this fold's own endog_hat. Second stage: `y ~ (1, endog_hat, A,
+    X1, X2)`, also via `_solve_ols`. Returns (second-stage coefficients --
+    usable with `_predict_ls_linear` plugging in the ACTUAL endogenous
+    variable at predict time, `used_lstsq` true if EITHER stage fell back
+    to lstsq, first-stage R^2 -- diagnostic only, never a weak-instrument
+    gate).
+    """
+    n = len(endog)
+    design_stage1 = np.column_stack([np.ones(n), instrument, a, x1, x2])
+    stage1_coef, used_lstsq_1 = _solve_ols(design_stage1, endog)
+    endog_hat = design_stage1 @ stage1_coef
+
+    ss_res = float(np.sum((endog - endog_hat) ** 2))
+    ss_tot = float(np.sum((endog - np.mean(endog)) ** 2))
+    first_stage_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    design_stage2 = np.column_stack([np.ones(n), endog_hat, a, x1, x2])
+    stage2_coef, used_lstsq_2 = _solve_ols(design_stage2, y)
+    return stage2_coef, bool(used_lstsq_1 or used_lstsq_2), first_stage_r2
+
+
+def run_2sls_method(
+    train_dataset: Any,
+    test_dataset: Any,
+    fold_plan: FoldPlan,
+    scenario: ScenarioSpec,
+    variant: str,
+) -> Dict[str, Any]:
+    """
+    H-2SLS: on this fold's own training rows, first stage `W ~
+    (1,Z,A,X1,X2)` then second stage `Y ~ (1,W_hat,A,X1,X2)`. Q-2SLS builds
+    the SAME propensity-reweighted R as `run_ls_method`
+    (`R_i={A_i*pi_i+(1-A_i)*(1-pi_i)}^-1`), then first stage `Z ~
+    (1,W,A,X1,X2)` and second stage `R ~ (1,Z_hat,A,X1,X2)`. Both bridges'
+    eval/test predictions plug in the ACTUAL W/Z via the already-shared
+    `_predict_ls_linear` -- never the first-stage fitted value, which is
+    used only inside that fold's own second-stage fit. `variant` picks
+    which propensity feeds R, exactly as in `run_ls_method`:
+
+    - "oracleP": `scenario.true_propensity` (the S1 analytical truth).
+    - "cfP": `_fit_cf_propensity`, refit fresh per fold on that fold's train
+      rows only.
+
+    A fold whose cfP logistic regression does not converge raises here
+    (caught by the caller as this method's failure). Q's predicted sign is
+    never forced positive.
+    """
+    if variant not in LS_VARIANTS:
+        raise ValueError(f"Unknown 2sls variant {variant!r}; expected one of {LS_VARIANTS}.")
+
+    train_df = train_dataset.data
+    test_df = test_dataset.data
+    n_train = len(train_dataset)
+    n_test = len(test_dataset)
+
+    h_observed_oof = np.full(n_train, np.nan)
+    h0_oof = np.full(n_train, np.nan)
+    h1_oof = np.full(n_train, np.nan)
+    q_observed_oof = np.full(n_train, np.nan)
+
+    test_W = test_df['W'].values
+    test_Z = test_df['Z'].values
+    test_X = test_df[['X1', 'X2']].values
+    test_ones_a = np.ones(n_test)
+    test_zeros_a = np.zeros(n_test)
+    test_h0_per_fold: List[np.ndarray] = []
+    test_h1_per_fold: List[np.ndarray] = []
+    test_q0_per_fold: List[np.ndarray] = []
+    test_q1_per_fold: List[np.ndarray] = []
+
+    fold_diagnostics_h: List[Dict[str, Any]] = []
+    fold_diagnostics_q: List[Dict[str, Any]] = []
+
+    for fold_id, (train_idx, eval_idx) in enumerate(fold_plan.splits, start=1):
+        fold_train = train_df.iloc[train_idx]
+        fold_eval = train_df.iloc[eval_idx]
+
+        train_W = fold_train['W'].values
+        train_Z = fold_train['Z'].values
+        train_X = fold_train[['X1', 'X2']].values
+        train_A = fold_train['A'].values
+        train_Y = fold_train['Y'].values
+
+        # --- H-2SLS: endogenous W instrumented by Z, both stages timed as
+        # ONE block (NEXT_IMPLEMENTATION_PROMPT.md section 5). ---
+        h_start = time.monotonic()
+        b_hat, used_lstsq_h, h_first_stage_r2 = _solve_2sls(
+            train_Y, train_W, train_Z, train_A, train_X[:, 0], train_X[:, 1],
+        )
+        h_seconds = time.monotonic() - h_start
+
+        # --- Q phase: propensity (oracleP analytic lookup / cfP fit) + R
+        # construction + Q's two 2SLS stages, timed as ONE block, same
+        # convention as run_ls_method so propensity time is never
+        # miscounted into evaluation_seconds. ---
+        q_start = time.monotonic()
+        if variant == "oracleP":
+            pi_train = scenario.true_propensity(train_W, train_X)
+        else:
+            pi_train, propensity_converged = _fit_cf_propensity(train_W, train_X, train_A)
+            if not propensity_converged:
+                raise RuntimeError(f"Fold {fold_id}'s cfP logistic regression did not converge.")
+
+        R_train = 1.0 / (train_A * pi_train + (1.0 - train_A) * (1.0 - pi_train))
+        t_hat, used_lstsq_q, q_first_stage_r2 = _solve_2sls(
+            R_train, train_Z, train_W, train_A, train_X[:, 0], train_X[:, 1],
+        )
+        q_seconds = time.monotonic() - q_start
+
+        eval_W = fold_eval['W'].values
+        eval_Z = fold_eval['Z'].values
+        eval_X = fold_eval[['X1', 'X2']].values
+        eval_A = fold_eval['A'].values
+        eval_ones_a = np.ones(len(eval_idx))
+        eval_zeros_a = np.zeros(len(eval_idx))
+
+        # Predictions always plug in the ACTUAL W/Z, never a first-stage
+        # fitted value (NEXT_IMPLEMENTATION_PROMPT.md sections 1, 2).
+        h_observed_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_A, eval_X)
+        h0_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_zeros_a, eval_X)
+        h1_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_ones_a, eval_X)
+        q_observed_oof[eval_idx] = _predict_ls_linear(t_hat, eval_Z, eval_A, eval_X)
+
+        test_h0_per_fold.append(_predict_ls_linear(b_hat, test_W, test_zeros_a, test_X))
+        test_h1_per_fold.append(_predict_ls_linear(b_hat, test_W, test_ones_a, test_X))
+        test_q0_per_fold.append(_predict_ls_linear(t_hat, test_Z, test_zeros_a, test_X))
+        test_q1_per_fold.append(_predict_ls_linear(t_hat, test_Z, test_ones_a, test_X))
+
+        fold_diagnostics_h.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(b_hat))),
+            "used_lstsq": bool(used_lstsq_h),
+            "train_seconds": h_seconds,
+            "propensity_min": None,
+            "propensity_max": None,
+            "first_stage_r2": h_first_stage_r2,
+        })
+        fold_diagnostics_q.append({
+            "fold_id": fold_id,
+            "solve_success": bool(np.all(np.isfinite(t_hat))),
+            "used_lstsq": bool(used_lstsq_q),
+            "train_seconds": q_seconds,
+            "propensity_min": float(np.min(pi_train)),
+            "propensity_max": float(np.max(pi_train)),
+            "first_stage_r2": q_first_stage_r2,
+        })
+
+    return {
+        "h_observed_oof": h_observed_oof,
+        "h0_oof": h0_oof,
+        "h1_oof": h1_oof,
+        "q_observed_oof": q_observed_oof,
+        "h0_test": np.mean(np.stack(test_h0_per_fold, axis=0), axis=0),
+        "h1_test": np.mean(np.stack(test_h1_per_fold, axis=0), axis=0),
+        "q0_test": np.mean(np.stack(test_q0_per_fold, axis=0), axis=0),
+        "q1_test": np.mean(np.stack(test_q1_per_fold, axis=0), axis=0),
+        "fold_diagnostics_h": fold_diagnostics_h,
+        "fold_diagnostics_q": fold_diagnostics_q,
+    }
+
+
+# ---------------------------------------------------------------------------
 # NMMR-U/V dispatch
 # ---------------------------------------------------------------------------
 
@@ -888,6 +1070,7 @@ _FOLD_DIAG_COLUMNS: Tuple[str, ...] = (
     "best_epoch", "stop_reason", "held_out_moment_risk", "train_seconds", "best_state_restored",
     "solve_success", "used_lstsq", "moment_residual_norm",
     "propensity_min", "propensity_max",
+    "first_stage_r2",
 )
 
 
@@ -918,15 +1101,15 @@ def compute_method_results(
     E1 与 E2"). `h_train_params`/`q_train_params` are only used (and only
     required) for "nmmr_u"/"nmmr_v"; every other method ignores them (no
     frozen config involved at all). `variant` is only meaningful for
-    "ls"/"ls_qf" ("oracleP"/"cfP"); every other method ignores it.
+    "ls"/"ls_qf"/"2sls" ("oracleP"/"cfP"); every other method ignores it.
 
     Raises `NonFiniteResultError` (Phase 1.1 item 5) if any required result
     -- OOF/test predictions, POR/PIPW/PDR, bridge MSE, (NMMR only) held-out
     moment risk -- is not finite; the caller records that as a failure
     instead of writing a row. A parametric_proximal fold whose Q solver
-    does not converge, or an ls/ls_qf cfP fold whose propensity logistic
-    regression does not converge, raises in its own run_*_method function,
-    caught the same way. h_train_seconds/q_train_seconds (summed from each
+    does not converge, or an ls/ls_qf/2sls cfP fold whose propensity
+    logistic regression does not converge, raises in its own run_*_method
+    function, caught the same way. h_train_seconds/q_train_seconds (summed from each
     bridge's own fold_diagnostics -- 0 for oracle, which has none) and
     evaluation_seconds (everything else) are purely diagnostic and never
     gate success.
@@ -940,6 +1123,8 @@ def compute_method_results(
         preds = run_ls_method(train_dataset, test_dataset, fold_plan, scenario, variant)
     elif method == "ls_qf":
         preds = run_ls_qf_method(train_dataset, test_dataset, fold_plan, scenario, variant)
+    elif method == "2sls":
+        preds = run_2sls_method(train_dataset, test_dataset, fold_plan, scenario, variant)
     elif method in ("nmmr_u", "nmmr_v"):
         preds = run_nmmr_method(
             method, train_dataset, test_dataset, fold_plan, rep_seeds, h_train_params, q_train_params,
@@ -1051,6 +1236,16 @@ def compute_method_results(
                     used_lstsq=d["used_lstsq"],
                     propensity_min=d["propensity_min"], propensity_max=d["propensity_max"],
                 ))
+    elif method == "2sls":
+        for bridge_type, diags in (("H", preds["fold_diagnostics_h"]), ("Q", preds["fold_diagnostics_q"])):
+            for d in diags:
+                fold_diag_rows.append(_make_fold_diag_row(
+                    method_id=method, bridge_type=bridge_type, fold_id=d["fold_id"],
+                    solve_success=d["solve_success"], train_seconds=d["train_seconds"],
+                    used_lstsq=d["used_lstsq"],
+                    propensity_min=d["propensity_min"], propensity_max=d["propensity_max"],
+                    first_stage_r2=d["first_stage_r2"],
+                ))
     # oracle: no fold diagnostics at all (plan asks that it not write fake
     # best_epoch/stop_reason/training records).
 
@@ -1106,6 +1301,20 @@ def build_run_config(
             "variants": list(LS_VARIANTS),
             "h_feature_names": list(LS_QF_H_FEATURE_NAMES),
             "q_feature_names": list(LS_QF_Q_FEATURE_NAMES),
+            "cfP_solver": "lbfgs",
+            "cfP_penalty": None,
+            "cfP_max_iter": _CFP_MAX_ITER,
+            "propensity_clipping": None,
+        }
+    if "2sls" in methods:
+        # Same fixed-ahead-of-time cfP settings as "ls"/"ls_qf", plus the
+        # fixed endogenous/instrument/exogenous roles for H/Q
+        # (NEXT_IMPLEMENTATION_PROMPT.md section 5) -- reproducibility
+        # only, not a CLI flag or a tuning knob.
+        config["2sls_settings"] = {
+            "variants": list(LS_VARIANTS),
+            "h_endogenous": "W", "h_instrument": "Z", "h_exogenous": ["A", "X1", "X2"],
+            "q_endogenous": "Z", "q_instrument": "W", "q_exogenous": ["A", "X1", "X2"],
             "cfP_solver": "lbfgs",
             "cfP_penalty": None,
             "cfP_max_iter": _CFP_MAX_ITER,
@@ -1176,7 +1385,7 @@ def run_sgd_protocol(
     if unknown_methods:
         raise ValueError(
             f"This round only supports methods {ALLOWED_METHODS}; got unsupported "
-            f"{unknown_methods}. 2SLS/RKHS are not implemented yet."
+            f"{unknown_methods}. RKHS is not implemented yet."
         )
     # "ls"/"ls_qf" each always expand into BOTH their pre-defined propensity
     # variants as separate (method, variant) run specs -- never one merged
