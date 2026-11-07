@@ -241,6 +241,24 @@ Round 2 选中的唯一 candidate 会在从未参与 HPO 的 pilot-confirm 上�
 
 ### 4. 命令示例
 
+#### 4.0 多样本量共享配置 HPO（一套配置覆盖 n=500/1000/2000/5000）
+
+给 `run_pilot_protocol.py` 同时传入 `--round2_sample_sizes` 与 `--pilot_confirm_sample_sizes` 即进入该模式：Round 1 只在一份 `--n_pilot_select` 大小的 `round1` 数据上初筛；Round 2 在每个样本量各自独立的 `round2` 数据上复评 top-k，样本量间按"除以该 n 下全程有效候选的中位数"归一化后合成一个分数（SE 以初始化种子为重复单位），再走 one-SE；confirm 在每个样本量各自独立的 `confirm` 数据上跑，任一样本量失败即 `failed`。数据放在 `--data_dir/sgd_shared_v2/` 下，由 `(base_seed, role, n)` 派生种子，本模式不允许 `--force-regenerate`。新的 HPO 请使用全新的 `--data_dir` 与 `--results_dir`；搜索空间见 `configs/sgd/nmmr_*/`（H 的 batch 为 `{32,64,128}`、Q 的为 `{32,64,128,256,500}`）。
+
+```bash
+python scripts/run_pilot_protocol.py \
+  --methods H-U \
+  --n_pilot_select 1000 \
+  --round2_sample_sizes 500,1000,2000,5000 \
+  --pilot_confirm_sample_sizes 500,1000,2000,5000 \
+  --n_trials 40 --top_k 5 \
+  --round2_init_seeds 11,22,33,44,55 \
+  --n_epochs 300 --n_splits 5 --patience 30 \
+  --scenario 1 --base_seed 20261107 \
+  --data_dir data/pilot_shared_v2 \
+  --results_dir tune_results/shared_v2/h_u
+```
+
 #### 4.1 单方法 smoke test
 
 先用小数据、少量 trial 确认端到端流程可以运行：
@@ -356,7 +374,7 @@ python scripts/run_pilot_protocol.py \
 | `--n_pilot_confirm` | `300` | 独立 pilot-confirm 样本量 |
 | `--n_trials` | `3` | **本次追加**的 Optuna trial 数，不是累计上限 |
 | `--top_k` | `2` | Round 1 进入 Round 2 的 candidate 数 |
-| `--round2_init_seeds` | `11,22` | Round 2 重复训练的初始化 seed |
+| `--round2_init_seeds` | `11,22`（多样本量共享模式：`11,22,33,44,55`） | Round 2 重复训练的初始化 seed |
 | `--n_epochs` | `15` | 单次训练的最大 epoch，覆盖搜索 config 中的同名值 |
 | `--n_splits` | `3` | Round 1/2 和 confirm 的折数 |
 | `--patience` | `5` | early stopping 容忍的无改善 epoch 数 |
@@ -479,16 +497,16 @@ standalone 的职责保持精简（精简与config管理.md section 6.6）：只
 `double_rob.py` 是 P0/E1/E2 的共用入口。SGD 走新的共用 protocol
 (`src/experiments/sgd_experiment_protocol.py`)：只读取 `configs/sgd_frozen/`
 下已通过 confirm 的正式 FrozenConfig，不再支持旧的 `*_fixed.json`，也不在内部
-运行 Optuna。目前已接入 `oracle`、`parametric_proximal`、`nmmr_u` 和
-`nmmr_v`，且只启用 `S1`；LS、LS-QF 和 2SLS 尚未接入，因此下面命令是当前
-已实现方法的联调命令，不是完整方法矩阵的正式 P0。RHC 旧流程未改动，继续沿用
-原有命令。
+运行 Optuna。目前已接入 `oracle`、`parametric_proximal`、`nmmr_u`、
+`nmmr_v`、`ls`、`ls_qf` 和 `2sls`，且只启用 `S1`。LS、LS-QF、2SLS 自动展开
+为 `oracleP/cfP` 两个 variant；完整方法矩阵每个重复产生10行结果。RHC 旧流程
+未改动，继续沿用原有命令。
 
 ```bash
-# SGD 当前四种已实现方法的小规模联调（不是完整 P0）
+# SGD 全方法小规模联调（不是正式 P0）
 python double_rob.py \
   --dataset_name sgd --run_stage P0 --scenarios S1 \
-  --methods oracle,parametric_proximal,nmmr_u,nmmr_v \
+  --methods oracle,parametric_proximal,nmmr_u,nmmr_v,ls,ls_qf,2sls \
   --sample_sizes 300 --repetitions 1 --test_size 1000 --n_splits 5 \
   --base_seed 20261103 --output_dir results/p0_s1_smoke_v1
 
@@ -594,6 +612,7 @@ NA。汇总前会检查每组的 `successes + failures` 是否等于 `run_config
 | 网络结构 | 双网络：$q_0(Z,X)$ / $q_1(Z,X)$ 分别学习 |
 | 激活函数 | 隐层 LeakyReLU，输出层 softplus（保证 $q > 0$） |
 | 核空间 | 高斯 RBF 核定义在 $(W, X)$ 空间上 |
+| 核带宽 | 训练核：fold 内 gradient-train 中位数启发式 × `kernel_bandwidth_multiplier`（可搜索）；评分核：同一中位数带宽 × 1（固定，所有候选共用） |
 | 损失函数 | 核最大矩约束（KMMR），支持 U/V 统计量 |
 
 ### NMMR-H（结果混杂桥函数） → POR 估计量
@@ -602,6 +621,7 @@ NA。汇总前会检查每组的 `successes + failures` 是否等于 `run_config
 |------|------|
 | 网络结构 | 单网络：$h(A, W, X)$ |
 | 核空间 | 高斯 RBF 核定义在 $(A, Z, X)$ 空间上 |
+| 核带宽 | 训练核：fold 内 gradient-train 中位数启发式 × `kernel_bandwidth_multiplier`（可搜索）；评分核：同一中位数带宽 × 1（固定，所有候选共用） |
 | ATE | $\hat{\tau} = n^{-1}\sum_i [h(1,W_i,X_i) - h(0,W_i,X_i)]$ |
 
 ### PDR（代理双稳健）
@@ -615,7 +635,7 @@ $$\hat{\tau}_{\text{PDR}} = \frac{1}{n}\sum_i \left[(2A_i-1)\,q_{A_i}(Z_i,X_i)(Y
 SGD 当前使用两类配置：
 
 - **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO；`experiment.py --mode traditional` 的 `--config_path` 也可以复用这类文件，只取其中的 `data_configs`
-- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；standalone 已读取该格式，正式 cross-fitting 将由新的共用 protocol 读取。
+- **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；standalone 与 `double_rob.py` 的 SGD 正式 cross-fitting protocol 都读取该格式。
 
 SGD 的旧 `*_fixed.json` 已删除，不再作为正式配置。RHC 的 legacy fixed 配置暂时
 保留，只服务尚未迁移的 RHC 旧流程。
