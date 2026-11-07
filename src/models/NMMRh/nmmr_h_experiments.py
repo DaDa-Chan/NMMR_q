@@ -62,8 +62,10 @@ def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: 
         S_H(lambda) = (1/n^2) r^T K_V r,
     evaluated on `indices` -- a held-out "score" fold that must never have
     participated in this candidate's gradient training or early stopping
-    (see nested_hpo_fold_split). Uses the kernel bandwidth frozen by the
-    trainer on its own gradient-training subset, not refit here.
+    (see nested_hpo_fold_split). Uses the fixed reference kernel (median
+    heuristic fitted on the trainer's gradient-training subset, multiplier
+    fixed at 1), NOT the candidate's own training kernel, so scores are
+    comparable across candidates with different kernel_bandwidth_multiplier.
     """
     view = _build_dataset_view(dataset, indices)
     scorer = NMMR_H_Loss(use_u_statistic=False)
@@ -74,7 +76,7 @@ def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: 
         X = view.X.to(trainer.device)
         Y = view.Y.to(trainer.device)
 
-        k_matrix = trainer._compute_kernel_matrix(A, Z, X)
+        k_matrix = trainer._compute_reference_kernel_matrix(A, Z, X)
 
         model_input = torch.cat((A, W, X), dim=1)
         pred = model(model_input)

@@ -13,9 +13,9 @@
     "batch_size": {
       "type": "categorical",
       "choices": [
-        256,
-        500,
-        1000
+        32,
+        64,
+        128
       ]
     },
     "patience": 30,
@@ -59,6 +59,7 @@
     "kernel_bandwidth_multiplier": {
       "type": "categorical",
       "choices": [
+        0.25,
         0.5,
         1,
         2

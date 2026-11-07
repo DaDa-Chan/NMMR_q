@@ -10,10 +10,10 @@ resumes by skipping finished keys (an existing CSV without a `bridge`
 column is treated as H-only, so older H results remain resumable).
 
 Example:
-    python scripts/pilot_h_batch.py --ns 500 1000 2000 5000 --reps 5 \
-        --out pilot_h_batch.csv
-    python scripts/pilot_h_batch.py --bridges q --ns 500 --reps 1 --out pilot_q.csv
-    python scripts/pilot_h_batch.py --ns 500 --reps 1 --methods u \
+    python scripts/pilot_bridge_batch.py --ns 500 1000 2000 5000 --reps 5 \
+        --out pilot_bridge_batch.csv
+    python scripts/pilot_bridge_batch.py --bridges q --ns 500 --reps 1 --out pilot_q.csv
+    python scripts/pilot_bridge_batch.py --ns 500 --reps 1 --methods u \
         --configs frozen bs32 "bs48_lr1e-3:batch_size=48,learning_rate=1e-3"
 """
 import argparse
@@ -79,7 +79,7 @@ def main():
     ap.add_argument("--bridges", nargs="+", default=["h"], choices=["h", "q"])
     ap.add_argument("--methods", nargs="+", default=["u", "v"], choices=["u", "v"])
     ap.add_argument("--configs", nargs="+", default=list(DEFAULT_CONFIGS))
-    ap.add_argument("--out", default="pilot_h_batch.csv")
+    ap.add_argument("--out", default="pilot_bridge_batch.csv")
     ap.add_argument("--n-test", type=int, default=20000)
     args = ap.parse_args()
 

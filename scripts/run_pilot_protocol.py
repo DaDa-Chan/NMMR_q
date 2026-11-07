@@ -38,6 +38,16 @@ actual production pilot, override --n_pilot_select/--n_pilot_confirm/
 (5000/5000/30-50/300/"11,22,33") -- that run will take much longer and
 should be started deliberately, not as a side effect of a quick check.
 
+Multi-sample-size shared-config mode: pass
+BOTH --round2_sample_sizes and --pilot_confirm_sample_sizes. Round 1 then runs
+on one round1 dataset of size --n_pilot_select, Round 2 re-evaluates the top_k
+finalists on an independent dataset for every size in --round2_sample_sizes
+(median-normalized and combined into one score per candidate), and pilot-confirm
+runs on an independent dataset per size in --pilot_confirm_sample_sizes. Data
+for this mode lives under --data_dir/sgd_shared_v2/..., one file per
+(role, n) with role in round1/round2/confirm; --force-regenerate is not
+allowed in this mode. Use a fresh --data_dir and --results_dir per run.
+
 Usage:
     python scripts/run_pilot_protocol.py
     python scripts/run_pilot_protocol.py --methods Q-U
@@ -45,6 +55,11 @@ Usage:
     python scripts/run_pilot_protocol.py --n_pilot_select 5000 --n_pilot_confirm 5000 \
         --n_trials 30 --n_epochs 300 --round2_init_seeds 11,22,33
     python scripts/run_pilot_protocol.py --force-regenerate
+    python scripts/run_pilot_protocol.py --methods H-U --n_pilot_select 1000 \
+        --round2_sample_sizes 500,1000,2000,5000 --pilot_confirm_sample_sizes 500,1000,2000,5000 \
+        --n_trials 40 --top_k 5 --round2_init_seeds 11,22,33,44,55 --n_epochs 300 --n_splits 5 \
+        --patience 30 --base_seed 20261107 --data_dir data/pilot_shared_v2 \
+        --results_dir tune_results/shared_v2/h_u
 """
 import argparse
 import copy
@@ -96,13 +111,24 @@ def main():
     parser.add_argument("--n_pilot_select", type=int, default=300)
     parser.add_argument("--n_pilot_confirm", type=int, default=300)
     parser.add_argument(
+        "--round2_sample_sizes", type=str, default="",
+        help="Comma-separated sample sizes for multi-n Round 2 (e.g. 500,1000,2000,5000). "
+             "Must be given together with --pilot_confirm_sample_sizes.",
+    )
+    parser.add_argument(
+        "--pilot_confirm_sample_sizes", type=str, default="",
+        help="Comma-separated sample sizes for multi-n pilot-confirm. Must be given together "
+             "with --round2_sample_sizes.",
+    )
+    parser.add_argument(
         "--n_trials", type=int, default=3,
         help="Number of additional Optuna trials to run in this invocation. "
              "Existing trials are preserved.",
     )
     parser.add_argument("--top_k", type=int, default=2, help="Round 1 finalists carried into Round 2")
-    parser.add_argument("--round2_init_seeds", type=str, default="11,22",
-                         help="Comma-separated init seeds for Round 2 (plan default: 11,22,33)")
+    parser.add_argument("--round2_init_seeds", type=str, default=None,
+                         help="Comma-separated init seeds for Round 2. Default: 11,22 in the "
+                              "single-sample-size mode, 11,22,33,44,55 in multi-sample-size mode.")
     parser.add_argument("--n_epochs", type=int, default=15)
     parser.add_argument("--n_splits", type=int, default=3)
     parser.add_argument("--patience", type=int, default=5)
@@ -119,21 +145,49 @@ def main():
     args = parser.parse_args()
 
     method_ids = _parse_methods(args.methods)
-    round2_init_seeds = tuple(int(s) for s in args.round2_init_seeds.split(","))
+    round2_ns = tuple(int(x) for x in args.round2_sample_sizes.split(",") if x.strip())
+    confirm_ns = tuple(int(x) for x in args.pilot_confirm_sample_sizes.split(",") if x.strip())
+    shared_mode = bool(round2_ns or confirm_ns)
+    if shared_mode and not (round2_ns and confirm_ns):
+        parser.error("--round2_sample_sizes and --pilot_confirm_sample_sizes must be given together.")
+    if shared_mode and args.force_regenerate:
+        parser.error("--force-regenerate is not allowed in multi-sample-size mode; use a new --data_dir.")
+    seeds_arg = args.round2_init_seeds
+    if seeds_arg is None:
+        seeds_arg = "11,22,33,44,55" if shared_mode else "11,22"
+    round2_init_seeds = tuple(int(s) for s in seeds_arg.split(","))
     data_dir = Path(args.data_dir)
     results_dir = Path(args.results_dir)
 
     print(f"=== Methods selected: {method_ids} ===")
 
-    print(f"\n=== Step 1/3: pilot_select (n={args.n_pilot_select}) and pilot_confirm "
-          f"(n={args.n_pilot_confirm}) -> {data_dir} "
-          f"(force_regenerate={args.force_regenerate}) ===")
-    pilot = hp.generate_pilot_datasets(
-        base_seed=args.base_seed, n_pilot_select=args.n_pilot_select,
-        n_pilot_confirm=args.n_pilot_confirm, scenario=args.scenario, save_dir=data_dir,
-        force_regenerate=args.force_regenerate,
-    )
-    print(f"select_data_seed={pilot.select_data_seed}, confirm_data_seed={pilot.confirm_data_seed}")
+    if shared_mode:
+        print(f"\n=== Step 1/3: round1 (n={args.n_pilot_select}), round2 {list(round2_ns)}, "
+              f"confirm {list(confirm_ns)} -> {data_dir} ===")
+        shared = hp.generate_shared_pilot_datasets(
+            base_seed=args.base_seed, round1_n=args.n_pilot_select, round2_ns=round2_ns,
+            confirm_ns=confirm_ns, scenario=args.scenario, save_dir=data_dir,
+        )
+        for role, group in (("round1", {args.n_pilot_select: shared.round1}),
+                            ("round2", shared.round2), ("confirm", shared.confirm)):
+            for n, info in sorted(group.items()):
+                print(f"{role}_n{n}: data_seed={info['data_seed']} sha256={info['sha256'][:12]}")
+        select_dataset, select_seed, select_sha = (
+            shared.round1["dataset"], shared.round1["data_seed"], shared.round1["sha256"])
+        confirm_dataset = None
+    else:
+        print(f"\n=== Step 1/3: pilot_select (n={args.n_pilot_select}) and pilot_confirm "
+              f"(n={args.n_pilot_confirm}) -> {data_dir} "
+              f"(force_regenerate={args.force_regenerate}) ===")
+        pilot = hp.generate_pilot_datasets(
+            base_seed=args.base_seed, n_pilot_select=args.n_pilot_select,
+            n_pilot_confirm=args.n_pilot_confirm, scenario=args.scenario, save_dir=data_dir,
+            force_regenerate=args.force_regenerate,
+        )
+        print(f"select_data_seed={pilot.select_data_seed}, confirm_data_seed={pilot.confirm_data_seed}")
+        select_dataset, select_seed, select_sha = (
+            pilot.select_dataset, pilot.select_data_seed, pilot.select_sha256)
+        confirm_dataset = pilot.confirm_dataset
 
     print(f"\n=== Step 2/3: Round 1 ({args.n_trials} trials, top_k={args.top_k}) -> Round 2 "
           f"(seeds={round2_init_seeds}) -> one-SE candidate -> pilot-confirm -> candidate saved "
@@ -174,16 +228,18 @@ def main():
         try:
             result = hp.run_and_confirm_method(
                 method_id=method_id,
-                pilot_select_dataset=pilot.select_dataset,
-                pilot_select_data_seed=pilot.select_data_seed,
-                pilot_confirm_dataset=pilot.confirm_dataset,
+                pilot_select_dataset=select_dataset,
+                pilot_select_data_seed=select_seed,
+                pilot_confirm_dataset=confirm_dataset,
                 data_configs=data_configs,
                 base_train_params=base_params,
                 search_space=search_space,
                 n_splits=args.n_splits, n_trials=args.n_trials, base_seed=args.base_seed,
                 top_k=args.top_k, round2_init_seeds=round2_init_seeds,
                 scenario=args.scenario, storage_dir=results_dir,
-                pilot_select_sha256=pilot.select_sha256,
+                pilot_select_sha256=select_sha,
+                round2_datasets=shared.round2 if shared_mode else None,
+                pilot_confirm_datasets=shared.confirm if shared_mode else None,
             )
         except hp.NoFiniteRound1TrialError as e:
             # No provisional candidate exists at all for this method, so
@@ -206,6 +262,16 @@ def main():
     for method_id, result in pipeline_results.items():
         frozen = result["frozen"]
         report = result["confirm_report"]
+        if shared_mode:
+            per_reports = report.get("per_sample_size", {})
+            per_n = {n: r.get("ate_estimate") for n, r in per_reports.items()}
+            print(
+                f"{method_id}: confirm_status={frozen.confirm_status}, "
+                f"failure_reasons={frozen.confirm_failure_reasons}, "
+                f"per-sample-size ate_estimate={per_n}, "
+                f"candidate={hp.candidate_config_path(method_id, results_dir)}"
+            )
+            continue
         print(
             f"{method_id}: confirm_status={frozen.confirm_status}, "
             f"failure_reasons={frozen.confirm_failure_reasons}, "

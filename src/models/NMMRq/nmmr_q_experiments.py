@@ -64,8 +64,10 @@ def _compute_unified_q_score(trainer,
         S_Q(lambda) = 0.5 * sum_{a in {0,1}} (1/n^2) rho_a^T K rho_a,
     evaluated on `indices` -- a held-out "score" fold that must never have
     participated in this candidate's gradient training or early stopping
-    (see nested_hpo_fold_split). Uses the kernel bandwidth frozen by the
-    trainer on its own gradient-training subset, not refit here.
+    (see nested_hpo_fold_split). Uses the fixed reference kernel (median
+    heuristic fitted on the trainer's gradient-training subset, multiplier
+    fixed at 1), NOT the candidate's own training kernel, so scores are
+    comparable across candidates with different kernel_bandwidth_multiplier.
     """
     view = _build_dataset_view(dataset, indices)
     scorer = NMMR_Q_Loss(use_u_statistic=False)
@@ -75,7 +77,7 @@ def _compute_unified_q_score(trainer,
         X = view.X.to(trainer.device)
         Z = view.Z.to(trainer.device)
 
-        k_matrix = trainer._compute_kernel_matrix(W, X)
+        k_matrix = trainer._compute_reference_kernel_matrix(W, X)
         score_total = torch.zeros((), device=trainer.device)
 
         mask0 = (A < 0.5).squeeze()

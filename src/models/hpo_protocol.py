@@ -307,6 +307,17 @@ def cleanup_or_reject_legacy_pilot_files(root: Path) -> List[Path]:
     return found
 
 
+SHARED_DGP_VERSION = "sgd_shared_v2"
+_SHARED_ROLE_IDS = {"round1": 1, "round2": 2, "confirm": 3}
+
+
+def derive_shared_data_seed(base_seed: int, role: str, n: int) -> int:
+    """Deterministic data_seed from (base_seed, role, sample size): every
+    (role, n) pair draws from its own independent stream."""
+    ss = np.random.SeedSequence([int(base_seed), _SHARED_ROLE_IDS[role], int(n)])
+    return int(ss.generate_state(1, dtype=np.uint32)[0])
+
+
 def ensure_pilot_dataset(
     role: str,
     n: int,
@@ -315,6 +326,7 @@ def ensure_pilot_dataset(
     dgp_version: str = DEFAULT_DGP_VERSION,
     root: Optional[Path] = None,
     force_regenerate: bool = False,
+    seed_scheme: str = "legacy",
 ) -> Dict[str, Any]:
     """
     Get the pilot dataset for (role, n, scenario, base_seed), reusing an
@@ -347,14 +359,25 @@ def ensure_pilot_dataset(
     ONLY this exact (role, n) pair -- printing the old/new SHA-256 when an
     existing file is being replaced -- and never touches any other (role, n).
 
+    `seed_scheme="shared_v2"` (multi-sample-size shared-config HPO) switches the roles to
+    "round1"/"round2"/"confirm" and derives data_seed from
+    (base_seed, role, n), so every (role, n) is an independent dataset. The
+    default "legacy" scheme above is unchanged.
+
     Returns {"df", "data_seed", "sha256", "path"} ("path" is None in the
     ephemeral root=None mode).
     """
-    if role not in ("select", "confirm"):
-        raise ValueError(f"role must be 'select' or 'confirm', got {role!r}")
-
-    role_idx = 0 if role == "select" else 1
-    data_seed = make_seed_bundle(base_seed, role_idx).data_seed
+    if seed_scheme == "shared_v2":
+        if role not in _SHARED_ROLE_IDS:
+            raise ValueError(f"role must be one of {sorted(_SHARED_ROLE_IDS)}, got {role!r}")
+        data_seed = derive_shared_data_seed(base_seed, role, n)
+    elif seed_scheme == "legacy":
+        if role not in ("select", "confirm"):
+            raise ValueError(f"role must be 'select' or 'confirm', got {role!r}")
+        role_idx = 0 if role == "select" else 1
+        data_seed = make_seed_bundle(base_seed, role_idx).data_seed
+    else:
+        raise ValueError(f"Unknown seed_scheme {seed_scheme!r}")
 
     if root is None:
         df = generate_data(n_samples=n, scenario=scenario, seed=data_seed)
@@ -380,6 +403,8 @@ def ensure_pilot_dataset(
         manifest["datasets"][key] = {
             "role": role, "n": n, "data_seed": data_seed, "path": filename, "sha256": file_hash,
         }
+        if seed_scheme != "legacy":
+            manifest["datasets"][key]["seed_scheme"] = seed_scheme
         _save_manifest(manifest_path, manifest)
         return file_hash
 
@@ -399,6 +424,8 @@ def ensure_pilot_dataset(
         actual_hash = _sha256_file(file_path)
         df = pd.read_csv(file_path)
         errors = []
+        if record.get("seed_scheme", "legacy") != seed_scheme:
+            errors.append(f"seed_scheme mismatch: manifest={record.get('seed_scheme', 'legacy')!r} vs expected={seed_scheme!r}")
         if record.get("role") != role:
             errors.append(f"role mismatch: manifest={record.get('role')!r} vs expected={role!r}")
         if record.get("n") != n:
@@ -488,9 +515,64 @@ def generate_pilot_datasets(
     )
 
 
+@dataclass
+class SharedPilotDatasets:
+    """Pilot data for the multi-sample-size shared-config HPO: one Round 1
+    dataset, one Round 2 dataset per sample size, one confirm dataset per
+    sample size. Every entry is {"dataset", "data_seed", "sha256", "n"}."""
+    round1: Dict[str, Any]
+    round2: Dict[int, Dict[str, Any]]
+    confirm: Dict[int, Dict[str, Any]]
+    scenario: int
+
+
+def generate_shared_pilot_datasets(
+    base_seed: int,
+    round1_n: int,
+    round2_ns: Tuple[int, ...],
+    confirm_ns: Tuple[int, ...],
+    scenario: int = 1,
+    save_dir: Optional[Path] = None,
+    dgp_version: str = SHARED_DGP_VERSION,
+) -> SharedPilotDatasets:
+    """
+    Get (or generate and record) the independent round1 / round2 / confirm
+    pilot datasets for the shared-config HPO. Existing files are reused only
+    if they match the manifest; nothing is ever force-regenerated here.
+    `save_dir=None` is the ephemeral mode (nothing touches disk).
+    """
+    for name, ns in (("round2_ns", round2_ns), ("confirm_ns", confirm_ns)):
+        if len(set(ns)) != len(ns):
+            raise ValueError(f"{name} contains duplicate sample sizes: {list(ns)}")
+    device = get_device()
+
+    def load(role: str, n: int) -> Dict[str, Any]:
+        info = ensure_pilot_dataset(
+            role, n, scenario, base_seed, dgp_version, save_dir, False, seed_scheme="shared_v2",
+        )
+        return {
+            "dataset": SGDDataset(csv_path='', df=info["df"], device=device),
+            "data_seed": info["data_seed"], "sha256": info["sha256"], "n": n,
+        }
+
+    return SharedPilotDatasets(
+        round1=load("round1", round1_n),
+        round2={n: load("round2", n) for n in round2_ns},
+        confirm={n: load("confirm", n) for n in confirm_ns},
+        scenario=scenario,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Frozen config artifact (plan 6.2 / hpo_selection_plan.md section 10)
 # ---------------------------------------------------------------------------
+
+SCORING_KERNEL_RULE = "median heuristic fitted on gradient_train, multiplier fixed at 1"
+# "globally valid" = no failed unit at ANY sample size, seed or fold.
+ROUND2_SCORE_NORMALIZATION = "divide by per-sample-size globally-valid-candidate median"
+# What a FrozenConfig saved before this field existed was actually scored with.
+LEGACY_SCORING_KERNEL_RULE = "candidate's own training kernel (median heuristic x kernel_bandwidth_multiplier; legacy, pre-fixed-reference scoring)"
+
 
 @dataclass
 class FrozenConfig:
@@ -510,6 +592,13 @@ class FrozenConfig:
     training_objective: str = ""  # "U" or "V"
     hpo_scoring_objective: str = "held-out V-statistic moment risk (plan 5.4 / hpo_selection_plan 6.3-6.4)"
     kernel_rule: str = "median heuristic, frozen per fold from gradient_train only (plan 3.4/5.3)"
+    scoring_kernel_rule: str = SCORING_KERNEL_RULE
+    # Multi-sample-size shared-config HPO; left at these defaults by the
+    # single-sample-size protocol.
+    round1_sample_size: Optional[int] = None
+    round2_sample_sizes: List[int] = field(default_factory=list)
+    round2_score_normalization: str = ""
+    pilot_confirm_sample_sizes: List[int] = field(default_factory=list)
     kernel_bandwidth_multiplier: Optional[float] = None
     n_splits: Optional[int] = None
     max_epochs: Optional[int] = None
@@ -603,6 +692,9 @@ class FrozenConfig:
         with open(path, "r") as f:
             payload = json.load(f)
         payload.pop("config_hash", None)  # save()'s only non-field addition.
+        # A file saved before this field existed was scored with the
+        # candidate's own training kernel; do not relabel it as the new rule.
+        payload.setdefault("scoring_kernel_rule", LEGACY_SCORING_KERNEL_RULE)
         valid_fields = {field_.name for field_ in fields(cls)}
         unknown = set(payload) - valid_fields
         if unknown:
@@ -815,7 +907,7 @@ def reevaluate_candidate_with_seeds(
                 train_seconds.append(train_result.train_seconds)
                 fold_records.append(build_fold_record(
                     fold_idx, fold_init_seed, None, params, score, train_result,
-                    failure_reason=None, extra={"round2_seed": init_seed, **q_stats},
+                    failure_reason=None, extra={"round2_seed": init_seed, "n_score": n, **q_stats},
                 ))
             except Exception as e:
                 record_failure(fold_idx, init_seed, f"exception: {e}")
@@ -841,6 +933,105 @@ def reevaluate_candidate_with_seeds(
     }
 
 
+def reevaluate_candidate_multi_n(
+    method_id: str,
+    params: Dict[str, Any],
+    datasets_by_n: Dict[int, Dict[str, Any]],
+    data_configs: Dict[str, Any],
+    n_splits: int,
+    split_seed: int,
+    init_seeds: Tuple[int, ...],
+) -> Dict[str, Any]:
+    """
+    Round 2 for ONE candidate across several sample sizes: runs
+    `reevaluate_candidate_with_seeds` once per sample size on that size's own
+    dataset (same `split_seed`, so every candidate sees the same folds for a
+    given (n, fold)). Returns the raw per-(n, seed, fold) records, each tagged
+    with sample_size / data_seed / data_sha256 / raw_score, plus `failed`
+    (True if ANY unit failed -- nothing is silently dropped). No value/SE here:
+    see `aggregate_round2_multi_n`.
+    """
+    records: List[Dict[str, Any]] = []
+    failure_reasons: List[str] = []
+    failed = False
+    total_train_seconds = 0.0
+    for n, info in sorted(datasets_by_n.items()):
+        agg = reevaluate_candidate_with_seeds(
+            method_id=method_id, params=params, dataset=info["dataset"],
+            data_configs=data_configs, n_splits=n_splits, split_seed=split_seed,
+            init_seeds=init_seeds,
+        )
+        failed = failed or not math.isfinite(agg["value"])
+        total_train_seconds += agg["total_train_seconds"]
+        failure_reasons.extend(f"n{n}_{r}" for r in agg["failure_reasons"])
+        for rec in agg["fold_records"]:
+            rec = dict(rec)
+            raw = rec.pop("score")
+            records.append({
+                "sample_size": n, "data_seed": info["data_seed"], "data_sha256": info["sha256"],
+                "raw_score": raw, **rec,
+            })
+    return {
+        "records": records, "failed": failed,
+        "total_train_seconds": total_train_seconds, "failure_reasons": failure_reasons,
+    }
+
+
+def aggregate_round2_multi_n(candidates: List[Dict[str, Any]]) -> None:
+    """
+    Fill `value` / `fold_se` (+ `fold_sd`, `round2_scale_by_n`) on each candidate dict, in place
+    and annotate each of its records with `scale_B_n`, `normalized_score`, `candidate_round2_value`,
+    `candidate_round2_se`. Each candidate carries `records` and `failed`.
+
+      S_{c,n,s}  = held-out-size-weighted mean over folds of raw_score
+      Sbar_{c,n} = mean over init seeds of S_{c,n,s}
+      B_n        = median over candidates that never failed of Sbar_{c,n}
+      T_{c,s}    = mean over n of S_{c,n,s} / B_n
+      value_c    = mean_s T_{c,s};   SE_c = SD(T_{c,.}, ddof=1) / sqrt(#seeds)
+
+    A candidate with any failed unit gets value = +inf, SE = 0 and is left out
+    of every B_n.
+    """
+    per_candidate: Dict[int, Dict[int, Dict[int, float]]] = {}
+    for idx, c in enumerate(candidates):
+        if c["failed"]:
+            continue
+        cells: Dict[Tuple[int, int], Tuple[List[float], List[int]]] = {}
+        for r in c["records"]:
+            scores, sizes = cells.setdefault((r["sample_size"], r["round2_seed"]), ([], []))
+            scores.append(r["raw_score"])
+            sizes.append(r["n_score"])
+        s_by_n: Dict[int, Dict[int, float]] = {}
+        for (n, seed), (scores, sizes) in cells.items():
+            s_by_n.setdefault(n, {})[seed] = weighted_fold_mean(scores, sizes)
+        per_candidate[idx] = s_by_n
+
+    scale_by_n: Dict[int, float] = {}
+    if per_candidate:
+        for n in sorted({n for s_by_n in per_candidate.values() for n in s_by_n}):
+            sbar = [float(np.mean(list(s_by_n[n].values()))) for s_by_n in per_candidate.values()]
+            scale_by_n[n] = float(np.median(sbar))
+
+    for idx, c in enumerate(candidates):
+        if idx not in per_candidate:
+            c.update({"value": float("inf"), "fold_se": 0.0, "fold_sd": 0.0, "round2_scale_by_n": scale_by_n})
+            for r in c["records"]:
+                r.update({"scale_B_n": scale_by_n.get(r["sample_size"]), "normalized_score": None,
+                          "candidate_round2_value": float("inf"), "candidate_round2_se": 0.0})
+            continue
+        s_by_n = per_candidate[idx]
+        seeds = sorted({seed for per_seed in s_by_n.values() for seed in per_seed})
+        t = [float(np.mean([s_by_n[n][seed] / scale_by_n[n] for n in sorted(s_by_n)])) for seed in seeds]
+        value = float(np.mean(t))
+        sd = float(np.std(t, ddof=1)) if len(t) > 1 else 0.0
+        se = sd / math.sqrt(len(t))
+        c.update({"value": value, "fold_se": se, "fold_sd": sd, "round2_scale_by_n": scale_by_n})
+        for r in c["records"]:
+            b = scale_by_n[r["sample_size"]]
+            r.update({"scale_B_n": b, "normalized_score": r["raw_score"] / b,
+                      "candidate_round2_value": value, "candidate_round2_se": se})
+
+
 def _search_space_sha256(search_space: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(search_space, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -851,7 +1042,11 @@ def _search_space_sha256(search_space: Dict[str, Any]) -> str:
 # this string if that scoring rule itself ever changes, so an old study
 # computed under the previous rule is never silently extended under a new
 # one (精简与config管理.md section 6.1).
-ROUND1_SCORING_RULE = "unified_v_statistic_moment_risk_v1"
+# v2: held-out scoring uses a fixed reference kernel (median x 1) instead of
+# each candidate's own training kernel (median x its multiplier), so scores
+# are comparable across candidates. Studies created under v1 cannot be
+# extended; use a new results_dir.
+ROUND1_SCORING_RULE = "unified_v_statistic_moment_risk_fixed_reference_bandwidth_v2"
 
 
 def _prepare_persistent_study(
@@ -941,6 +1136,7 @@ def run_hpo_study_for_method(
     round2_init_seeds: Tuple[int, ...] = DEFAULT_ROUND2_INIT_SEEDS,
     storage_dir: Optional[Path] = None,
     pilot_select_sha256: Optional[str] = None,
+    round2_datasets: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[FrozenConfig, pd.DataFrame, pd.DataFrame]:
     """
     Full two-round selection for ONE method (H-U, H-V, Q-U, or Q-V -- never
@@ -957,6 +1153,14 @@ def run_hpo_study_for_method(
       initialization differs), to check robustness to random init.
     Final selection (section 8): one-SE rule applied to Round 2's richer
       per-candidate score distribution, not Round 1's single-seed score.
+
+    Multi-sample-size mode: when
+    `round2_datasets` ({n: {"dataset", "data_seed", "sha256"}}) is given,
+    Round 1 still runs on `pilot_select_dataset` only, but Round 2 re-evaluates
+    each finalist on EVERY dataset in `round2_datasets`; the per-sample-size
+    scores are median-normalized and combined into one `value`/`SE` per
+    candidate (`aggregate_round2_multi_n`), which the same one-SE rule then
+    consumes. Only held-out moment risk enters the selection.
 
     Returns (frozen_config, round1_trial_table, round2_finalists_table) --
     `frozen_config`'s `status` is "provisional" here, before pilot-confirm
@@ -1042,15 +1246,23 @@ def run_hpo_study_for_method(
     round2_fold_rows: List[Dict[str, Any]] = []
     for trial in top_k_trials:
         candidate_params = {**base_train_params, **trial.params}
-        agg = reevaluate_candidate_with_seeds(
-            method_id=method_id, params=candidate_params, dataset=pilot_select_dataset,
-            data_configs=data_configs, n_splits=n_splits, split_seed=seeds.split_seed,
-            init_seeds=round2_init_seeds,
-        )
-        for rec in agg.get("fold_records", []):
-            round2_fold_rows.append({
-                "method_id": method_id, "round1_trial_number": trial.number, **rec,
-            })
+        if round2_datasets is None:
+            agg = reevaluate_candidate_with_seeds(
+                method_id=method_id, params=candidate_params, dataset=pilot_select_dataset,
+                data_configs=data_configs, n_splits=n_splits, split_seed=seeds.split_seed,
+                init_seeds=round2_init_seeds,
+            )
+        else:
+            agg = reevaluate_candidate_multi_n(
+                method_id=method_id, params=candidate_params, datasets_by_n=round2_datasets,
+                data_configs=data_configs, n_splits=n_splits, split_seed=seeds.split_seed,
+                init_seeds=round2_init_seeds,
+            )
+        if round2_datasets is None:
+            for rec in agg.get("fold_records", []):
+                round2_fold_rows.append({
+                    "method_id": method_id, "round1_trial_number": trial.number, **rec,
+                })
         round2_candidates.append({
             "round1_trial_number": trial.number,
             "network_depth": candidate_params.get("network_depth"),
@@ -1062,6 +1274,14 @@ def run_hpo_study_for_method(
             **agg,
             "_params": candidate_params,
         })
+
+    if round2_datasets is not None:
+        aggregate_round2_multi_n(round2_candidates)
+        for cand in round2_candidates:
+            for rec in cand["records"]:
+                round2_fold_rows.append({
+                    "method_id": method_id, "round1_trial_number": cand["round1_trial_number"], **rec,
+                })
 
     # One row per (candidate, seed, fold) -- pilot HPO fix request item 7 --
     # not just one aggregate row per candidate.
@@ -1103,6 +1323,13 @@ def run_hpo_study_for_method(
         selected_round1_trial_number=selected["round1_trial_number"],
         pure_min_round1_trial_number=pure_min["round1_trial_number"],
     )
+    if round2_datasets is not None:
+        frozen = replace(
+            frozen,
+            round1_sample_size=len(pilot_select_dataset),
+            round2_sample_sizes=sorted(round2_datasets),
+            round2_score_normalization=ROUND2_SCORE_NORMALIZATION,
+        )
     return frozen, round1_table, round2_table
 
 
@@ -1130,6 +1357,8 @@ def run_and_confirm_method(
     scenario: Optional[int] = None,
     storage_dir: Optional[Path] = None,
     pilot_select_sha256: Optional[str] = None,
+    round2_datasets: Optional[Dict[int, Dict[str, Any]]] = None,
+    pilot_confirm_datasets: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     The full, safe pipeline for one method: Round 1 + Round 2 + one-SE
@@ -1147,25 +1376,40 @@ def run_and_confirm_method(
     there is no provisional candidate at all in that case, so this function
     does not catch it; the caller (e.g. the script's per-method loop)
     decides whether to skip this method and continue with the others.
+
+    Multi-sample-size mode: pass BOTH `round2_datasets` and
+    `pilot_confirm_datasets` ({n: {"dataset", "data_seed", "sha256"}});
+    `pilot_confirm_dataset` is then unused (may be None) and confirm runs on
+    every sample size, passing only if all of them pass.
     """
+    if (round2_datasets is None) != (pilot_confirm_datasets is None):
+        raise ValueError("round2_datasets and pilot_confirm_datasets must be given together.")
     provisional, round1_table, round2_table = run_hpo_study_for_method(
         method_id=method_id, pilot_select_dataset=pilot_select_dataset,
         pilot_select_data_seed=pilot_select_data_seed, data_configs=data_configs,
         base_train_params=base_train_params, search_space=search_space,
         n_splits=n_splits, n_trials=n_trials, base_seed=base_seed,
         top_k=top_k, round2_init_seeds=round2_init_seeds, storage_dir=storage_dir,
-        pilot_select_sha256=pilot_select_sha256,
+        pilot_select_sha256=pilot_select_sha256, round2_datasets=round2_datasets,
     )
 
     try:
-        report = evaluate_pilot_confirm(
-            frozen_config=provisional, pilot_confirm_dataset=pilot_confirm_dataset,
-            data_configs=data_configs, scenario=scenario,
-        )
+        if pilot_confirm_datasets is None:
+            report = evaluate_pilot_confirm(
+                frozen_config=provisional, pilot_confirm_dataset=pilot_confirm_dataset,
+                data_configs=data_configs, scenario=scenario,
+            )
+        else:
+            report = evaluate_pilot_confirm_multi_n(
+                frozen_config=provisional, confirm_datasets=pilot_confirm_datasets,
+                data_configs=data_configs, scenario=scenario,
+            )
     except Exception as e:
         report = {"method_id": method_id, "exception": str(e)}
 
     decision = decide_pilot_confirm(report)
+    if pilot_confirm_datasets is not None:
+        provisional = replace(provisional, pilot_confirm_sample_sizes=sorted(pilot_confirm_datasets))
     frozen = replace(
         provisional,
         status="confirmed" if decision["status"] == "passed" else "failed",
@@ -1362,6 +1606,51 @@ def evaluate_pilot_confirm(
             )
             report["h_true_bridge_mse"] = float(np.mean((h_preds["h_fact"].reshape(-1) - true_h) ** 2))
 
+    return report
+
+
+def evaluate_pilot_confirm_multi_n(
+    frozen_config: FrozenConfig,
+    confirm_datasets: Dict[int, Dict[str, Any]],
+    data_configs: Dict[str, Any],
+    scenario: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Run `evaluate_pilot_confirm` on the independent confirm dataset of EACH
+    sample size and combine the results into one report that
+    `decide_pilot_confirm` can judge unchanged: each of its four boolean
+    checks must hold at every sample size, and an exception at any sample
+    size is reported as an overall `exception`. Per-sample-size reports are
+    kept under `per_sample_size` (true-bridge MSE etc. are diagnostics only).
+    """
+    per_n: Dict[int, Dict[str, Any]] = {}
+    exceptions: List[str] = []
+    for n, info in sorted(confirm_datasets.items()):
+        try:
+            rep_n = evaluate_pilot_confirm(
+                frozen_config=frozen_config, pilot_confirm_dataset=info["dataset"],
+                data_configs=data_configs, scenario=scenario,
+            )
+        except Exception as e:
+            rep_n = {"method_id": frozen_config.method_id, "exception": str(e)}
+            exceptions.append(f"n={n}: {e}")
+        rep_n.update({"sample_size": n, "data_seed": info["data_seed"], "data_sha256": info["sha256"]})
+        per_n[n] = rep_n
+
+    def every(key: str) -> bool:
+        return all(r.get(key, False) for r in per_n.values())
+
+    report: Dict[str, Any] = {
+        "method_id": frozen_config.method_id,
+        "sample_sizes": sorted(per_n),
+        "per_sample_size": per_n,
+        "all_folds_restored_best_checkpoint": every("all_folds_restored_best_checkpoint"),
+        "ate_all_finite": every("ate_all_finite"),
+        "moment_risk_all_finite": every("moment_risk_all_finite"),
+        "predictions_all_finite": every("predictions_all_finite"),
+    }
+    if exceptions:
+        report["exception"] = "; ".join(exceptions)
     return report
 
 

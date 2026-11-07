@@ -88,6 +88,9 @@ class NMMR_H_Trainer:
         # (i.e. use the fitted bandwidth as-is) so existing configs are unaffected.
         self.kernel_bandwidth_multiplier = float(train_params.get('kernel_bandwidth_multiplier', 1.0))
         self._frozen_sigma: Optional[float] = None
+        # Fixed scoring bandwidth: median heuristic x 1, independent of the candidate's
+        # kernel_bandwidth_multiplier, so held-out scores are comparable across candidates.
+        self._reference_sigma: Optional[float] = None
         # PyTorch 2.2 exposes GradScaler under torch.cuda.amp; the
         # torch.amp.GradScaler entry point was added in a later release.
         self.scaler = GradScaler() if self.use_amp else None
@@ -138,14 +141,34 @@ class NMMR_H_Trainer:
         )
         return k_matrix
 
+    def _compute_reference_kernel_matrix(self, batch_A, batch_Z, batch_X):
+        """
+        Scoring kernel on the same (A, Z, X) inputs, but with the fixed
+        reference bandwidth (median heuristic x 1) instead of the candidate's
+        training bandwidth. Used by every held-out moment-risk score.
+        """
+        if self._reference_sigma is None:
+            raise RuntimeError(
+                "Reference bandwidth has not been set yet; call _freeze_kernel_bandwidth "
+                "on the training subset before computing any scoring kernel."
+            )
+        kernel_inputs = torch.cat((batch_A, batch_Z, batch_X), dim=1)
+        return calculate_kernel_matrix_batched(
+            dataset=kernel_inputs, batch_indices=(0, kernel_inputs.shape[0]), kernel=G_kernel,
+            sigma=self._reference_sigma, gamma=None,
+        )
+
     def _freeze_kernel_bandwidth(self, A, Z, X) -> float:
         """
         Fit the median-heuristic bandwidth once from the given (training-only)
-        subset and freeze it for the rest of this fold's training, validation,
-        and HPO scoring. Must be called with training data only.
+        subset. The training kernel (`_frozen_sigma` = median x the candidate's
+        multiplier) is frozen for this fold's training and early-stopping
+        validation; the scoring kernel (`_reference_sigma` = median x 1) is
+        frozen for held-out scoring. Must be called with training data only.
         """
         kernel_inputs = torch.cat((A, Z, X), dim=1)
         base_sigma = fit_sigma(kernel_inputs)
+        self._reference_sigma = base_sigma
         self._frozen_sigma = base_sigma * self.kernel_bandwidth_multiplier
         return self._frozen_sigma
 
