@@ -47,3 +47,6 @@ train_results/
 saved_models/
 logs/
 predicts/
+
+# Server pilot diagnostic outputs (not for GitHub)
+pilot_out/
