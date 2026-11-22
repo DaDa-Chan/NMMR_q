@@ -55,3 +55,22 @@ def calculate_kernel_matrix_batched(dataset, batch_indices:tuple, kernel=G_kerne
     tensor2 = tensor.unsqueeze(dim=1)
 
     return kernel(tensor1, tensor2, **kwargs)
+
+
+def diag_weighted_loss(residuals, kernel_matrix, diag_tau):
+    """
+    Diagonal-weighted NMMR loss for a residual column vector r (shape [N, 1]):
+        r^T K_off r / (N (N-1)) + tau * sum_i r_i^2 K_ii / N.
+    tau = 0 reproduces the U-statistic. The input kernel matrix is not modified.
+    Returns a [1, 1] tensor, matching the legacy U/V branches.
+    """
+    N = kernel_matrix.shape[0]
+    k_diag = torch.diagonal(kernel_matrix)
+    k_off = kernel_matrix.clone()
+    k_off.fill_diagonal_(0)
+    if N > 1:
+        off_term = (residuals.T @ k_off @ residuals) / (N * (N - 1))
+    else:
+        off_term = torch.zeros((1, 1), device=kernel_matrix.device, dtype=kernel_matrix.dtype)
+    diag_term = (residuals.squeeze(-1) ** 2 * k_diag).sum() / N
+    return off_term + diag_tau * diag_term

@@ -18,7 +18,9 @@ from torch.cuda.amp import GradScaler, autocast
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common, NMMR_Q_DualModel
 from src.models.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
-from src.models.experiment_common import to_bool, check_loss_name_matches_u_statistic, TrainResult
+from src.models.experiment_common import (
+    to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau, TrainResult,
+)
 from src.utils import get_device
 
 
@@ -103,6 +105,9 @@ class NMMR_Q_Trainer:
         self._reference_sigma: Optional[float] = None
 
         check_loss_name_matches_u_statistic(train_params)
+        # Optional diagonal-weight rule (实验计划 v2 section 2.1); validated here,
+        # resolved to a numeric tau in train() once the training-set size is known.
+        check_diag_weight_config(train_params)
         self.q_loss = NMMR_Q_Loss(
             use_u_statistic=self.train_params.get('use_u_statistic', False),
         )
@@ -242,6 +247,8 @@ class NMMR_Q_Trainer:
         train_W_all = _select_rows(train_dataset.W, train_indices).to(self.device)
         train_X_all = _select_rows(train_dataset.X, train_indices).to(self.device)
         self._freeze_kernel_bandwidth(train_W_all, train_X_all)
+        # Resolve the diagonal weight from the gradient-training size (None keeps legacy U/V).
+        self.q_loss.diag_tau = resolve_diag_tau(self.train_params, len(train_indices) if train_indices is not None else len(train_dataset))
 
         scheduler0 = scheduler1 = None
         if self.use_scheduler:

@@ -26,6 +26,68 @@ def to_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+DIAG_WEIGHT_RULES = ("corrected", "fixed_alpha")
+
+
+def check_diag_weight_config(train_params: Dict[str, Any]) -> Optional[str]:
+    """
+    Validate the optional diagonal-weight configuration of the NMMR losses
+    (实验计划 v2 section 2.1 / batch目标的三个补充命题 Prop. S.2) and return the
+    normalized rule name, or None when the legacy U/V switch is in effect.
+
+    Keys:
+      diag_weight_rule: None/"none" (legacy: `use_u_statistic` picks U or V),
+                        "corrected"   (tau = 1/(n_train - 1), so the expected
+                                       mini-batch loss is n/(n-1) * full-sample V),
+                        "fixed_alpha" (tau = diag_alpha / (batch_size - 1)).
+      diag_alpha:       required for "fixed_alpha", must be >= 0.
+
+    A diagonal rule replaces the U/V switch, so it is an error to combine it
+    with use_u_statistic=True or with a loss_name that claims plain U or V.
+    """
+    rule = train_params.get('diag_weight_rule')
+    if rule is None or (isinstance(rule, str) and rule.strip().lower() in ("", "none")):
+        return None
+    rule = str(rule).strip().lower()
+    if rule not in DIAG_WEIGHT_RULES:
+        raise ValueError(f"Unknown diag_weight_rule {rule!r}; expected one of {DIAG_WEIGHT_RULES} or None.")
+    if to_bool(train_params.get('use_u_statistic', False)):
+        raise ValueError("diag_weight_rule cannot be combined with use_u_statistic=True.")
+    loss_name = train_params.get('loss_name')
+    if loss_name is not None and str(loss_name).strip().lower() in ("u_statistic", "v_statistic"):
+        raise ValueError(
+            f"loss_name={loss_name!r} labels a plain U/V loss, but diag_weight_rule={rule!r} "
+            "is set; use a distinct loss_name (e.g. 'diag_corrected')."
+        )
+    if rule == "fixed_alpha":
+        alpha = train_params.get('diag_alpha')
+        if alpha is None or float(alpha) < 0:
+            raise ValueError("diag_weight_rule='fixed_alpha' requires diag_alpha >= 0.")
+    return rule
+
+
+def resolve_diag_tau(train_params: Dict[str, Any], n_train: int) -> Optional[float]:
+    """
+    Effective diagonal weight tau of the mini-batch NMMR loss
+        L(B) = r_B^T K_off r_B / (b (b-1)) + tau * sum_{i in B} r_i^2 K_ii / b,
+    whose expectation over uniformly drawn batches is R_U + tau * D (Prop. S.2).
+    Returns None when the legacy U/V switch is in effect.
+
+    n_train is the number of gradient-training samples of this fold.
+    """
+    rule = check_diag_weight_config(train_params)
+    if rule is None:
+        return None
+    if rule == "corrected":
+        if n_train < 2:
+            raise ValueError("diag_weight_rule='corrected' needs at least 2 training samples.")
+        return 1.0 / (n_train - 1)
+    batch_size = int(train_params['batch_size'])
+    if batch_size < 2:
+        raise ValueError("diag_weight_rule='fixed_alpha' needs batch_size >= 2.")
+    return float(train_params['diag_alpha']) / (batch_size - 1)
+
+
 def check_loss_name_matches_u_statistic(train_params: Dict[str, Any]) -> None:
     """
     Guard against a config where `loss_name` and `use_u_statistic` disagree
