@@ -17,7 +17,8 @@ from src.models.NMMRh.nmmr_h_loss import NMMR_H_Loss
 from src.models.NMMRh.nmmr_h_model import MLP_for_NMMR
 from src.models.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 from src.models.experiment_common import (
-    to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau, TrainResult,
+    to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau,
+    resolve_checkpoint_criterion, TrainResult,
 )
 from src.utils import get_device
 
@@ -102,6 +103,9 @@ class NMMR_H_Trainer:
         # resolved to a numeric tau in train() once the training-set size is known.
         check_diag_weight_config(train_params)
         self.h_loss = NMMR_H_Loss(use_u_statistic=self.train_params.get('use_u_statistic', False))
+        # Validation score for early stopping / scheduler / best checkpoint (plan v2 section 3.2).
+        self.checkpoint_criterion = resolve_checkpoint_criterion(train_params)
+        self.h_val_loss = NMMR_H_Loss(diag_tau=0.0) if self.checkpoint_criterion == "u_statistic" else self.h_loss
 
         # These four switches are independent: logging must never change what
         # training actually does. A caller with no val_loader (e.g. a final
@@ -282,7 +286,7 @@ class NMMR_H_Trainer:
                 v_in = torch.cat((v_A, v_W, v_X), dim=1)
                 v_pred = model(v_in)
                 v_k = self._compute_kernel_matrix(v_A, v_Z, v_X)
-                val_loss = self.h_loss(v_pred, v_Y, v_k)
+                val_loss = self.h_val_loss(v_pred, v_Y, v_k)
 
             val_score = val_loss.item()
             val_is_finite = math.isfinite(val_score)
@@ -291,7 +295,7 @@ class NMMR_H_Trainer:
 
             if self.log_metrics and self.writer is not None:
                 self.writer.add_scalar(f'{self.loss_name}/train', train_loss, epoch)
-                self.writer.add_scalar(f'{self.loss_name}/val', val_loss, epoch)
+                self.writer.add_scalar(f'val/{self.checkpoint_criterion}', val_loss, epoch)
                 self.causal_train_losses.append(train_loss.item())
                 self.causal_val_losses.append(val_score)
 

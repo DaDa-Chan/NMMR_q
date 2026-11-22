@@ -19,7 +19,8 @@ from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common, NMMR_Q_DualModel
 from src.models.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
 from src.models.experiment_common import (
-    to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau, TrainResult,
+    to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau,
+    resolve_checkpoint_criterion, TrainResult,
 )
 from src.utils import get_device
 
@@ -108,6 +109,10 @@ class NMMR_Q_Trainer:
         # Optional diagonal-weight rule (实验计划 v2 section 2.1); validated here,
         # resolved to a numeric tau in train() once the training-set size is known.
         check_diag_weight_config(train_params)
+        # Validation score for early stopping / scheduler / best checkpoint (plan v2 section 3.2).
+        # diag_tau=0 is the U-statistic without mutating the kernel matrix.
+        self.checkpoint_criterion = resolve_checkpoint_criterion(train_params)
+        self.q_val_loss = NMMR_Q_Loss(diag_tau=0.0) if self.checkpoint_criterion == "u_statistic" else None
         self.q_loss = NMMR_Q_Loss(
             use_u_statistic=self.train_params.get('use_u_statistic', False),
         )
@@ -190,13 +195,15 @@ class NMMR_Q_Trainer:
         self._frozen_sigma = base_sigma * self.kernel_bandwidth_multiplier
         return self._frozen_sigma
     
-    def _q_loss_on_split(self, model0, model1, A, W, Z, X, kernel_matrix):
-        """Compute the combined q-loss for one split, given a pre-built kernel matrix."""
+    def _q_loss_on_split(self, model0, model1, A, W, Z, X, kernel_matrix, loss_fn=None):
+        """Compute the combined q-loss for one split, given a pre-built kernel matrix.
+        loss_fn defaults to the training loss (self.q_loss)."""
+        loss_fn = self.q_loss if loss_fn is None else loss_fn
         mask0 = (A < 0.5).squeeze()
         if mask0.sum() > 0:
             input0 = torch.cat((Z[mask0], X[mask0]), dim=1)
             p0 = model0(input0)
-            loss0 = self.q_loss(p0, mask0, kernel_matrix)
+            loss0 = loss_fn(p0, mask0, kernel_matrix)
         else:
             loss0 = torch.zeros((), device=self.device)
 
@@ -204,7 +211,7 @@ class NMMR_Q_Trainer:
         if mask1.sum() > 0:
             input1 = torch.cat((Z[mask1], X[mask1]), dim=1)
             p1 = model1(input1)
-            loss1 = self.q_loss(p1, mask1, kernel_matrix)
+            loss1 = loss_fn(p1, mask1, kernel_matrix)
         else:
             loss1 = torch.zeros((), device=self.device)
 
@@ -349,7 +356,7 @@ class NMMR_Q_Trainer:
                 val_X = _select_rows(val_dataset.X, val_indices).to(self.device)
                 k_val = self._compute_kernel_matrix(val_W, val_X)
                 causal_loss_val_full = self._q_loss_on_split(
-                    model0, model1, val_A, val_W, val_Z, val_X, k_val
+                    model0, model1, val_A, val_W, val_Z, val_X, k_val, loss_fn=self.q_val_loss
                 )
 
             val_score = causal_loss_val_full.item()
@@ -359,7 +366,7 @@ class NMMR_Q_Trainer:
 
             if self.log_metrics and self.writer is not None:
                 self.writer.add_scalar(f'{self.loss_name}/train', total_train_loss, epoch)
-                self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val_full, epoch)
+                self.writer.add_scalar(f'val/{self.checkpoint_criterion}', causal_loss_val_full, epoch)
                 self.causal_train_losses.append(total_train_loss.item())
                 self.causal_val_losses.append(val_score)
 

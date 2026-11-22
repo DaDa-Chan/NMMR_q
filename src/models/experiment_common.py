@@ -88,6 +88,32 @@ def resolve_diag_tau(train_params: Dict[str, Any], n_train: int) -> Optional[flo
     return float(train_params['diag_alpha']) / (batch_size - 1)
 
 
+CHECKPOINT_CRITERIA = ("u_statistic", "training_loss")
+
+
+def resolve_checkpoint_criterion(train_params: Dict[str, Any]) -> str:
+    """
+    Validation score used for early stopping, the LR scheduler and best-checkpoint
+    selection (实验计划 v2 section 3.2).
+
+      "u_statistic"   (default): the held-out U-statistic moment risk under the
+                      candidate's own training kernel, for every training
+                      objective. It is unbiased for the population risk; the
+                      V-statistic adds a residual-variance term D/m that acts as
+                      another diagonal penalty.
+      "training_loss" (legacy):  the candidate's own training loss (U, V or the
+                      diagonal-weighted loss) on the validation split, i.e. the
+                      behaviour before this option existed.
+
+    For U-statistic training both choices give bit-identical scores.
+    """
+    value = train_params.get('checkpoint_criterion', 'u_statistic')
+    value = str(value).strip().lower()
+    if value not in CHECKPOINT_CRITERIA:
+        raise ValueError(f"Unknown checkpoint_criterion {value!r}; expected one of {CHECKPOINT_CRITERIA}.")
+    return value
+
+
 def read_output_clip(train_params, key):
     """
     Optional output-clipping level from train_params[key] (实验计划 v2 section 2.3).
