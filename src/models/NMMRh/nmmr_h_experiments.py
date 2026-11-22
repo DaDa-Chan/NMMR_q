@@ -55,6 +55,12 @@ def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_n
         )
 
 def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> Tuple[float, int]:
+    """V-statistic unified score (see _compute_unified_h_scores); returns (score_v, n)."""
+    score_v, _, n = _compute_unified_h_scores(trainer, model, dataset, indices)
+    return score_v, n
+
+
+def _compute_unified_h_scores(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> Tuple[float, float, int]:
     """
     Unified HPO scoring metric for H (plan section 5.4): regardless of
     whether this candidate trained with the U- or V-statistic objective,
@@ -66,9 +72,14 @@ def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: 
     heuristic fitted on the trainer's gradient-training subset, multiplier
     fixed at 1), NOT the candidate's own training kernel, so scores are
     comparable across candidates with different kernel_bandwidth_multiplier.
+
+    Returns (score_v, score_u, n). score_v is the ranking metric above;
+    score_u is the same quantity with the U-statistic (diagonal removed),
+    recorded alongside it (实验计划 v2 section 3.3) but not used for ranking.
     """
     view = _build_dataset_view(dataset, indices)
     scorer = NMMR_H_Loss(use_u_statistic=False)
+    scorer_u = NMMR_H_Loss(diag_tau=0.0)
     with torch.no_grad():
         A = view.A.to(trainer.device)
         W = view.W.to(trainer.device)
@@ -82,8 +93,9 @@ def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: 
         pred = model(model_input)
 
         score = scorer(pred, Y, k_matrix)
+        score_u = scorer_u(pred, Y, k_matrix)
 
-    return float(score.item()), len(indices)
+    return float(score.item()), float(score_u.item()), len(indices)
 
 def _run_optuna_tuning(
     data_name:str,
@@ -226,7 +238,7 @@ def _run_optuna_tuning(
                     return fail(fold_idx, "nonfinite_during_training", fold_init_seed, fold_shuffle_seed, train_result)
 
                 # Unified V-statistic score (plan 5.4), on the untouched score fold.
-                fold_score, fold_n = _compute_unified_h_score(
+                fold_score, fold_score_u, fold_n = _compute_unified_h_scores(
                     trainer, model, dataset, score_idx.tolist()
                 )
                 # Plan 5.8: NaN/Inf score is a failure, not a value to average in.
@@ -238,7 +250,7 @@ def _run_optuna_tuning(
                 fold_train_seconds.append(train_result.train_seconds)
                 fold_records.append(build_fold_record(
                     fold_idx, fold_init_seed, fold_shuffle_seed, current_params, fold_score, train_result,
-                    failure_reason=None,
+                    failure_reason=None, extra={"score_u": fold_score_u},
                 ))
             except Exception as e:
                 print(f"[Optuna] Trial {trial.number} Fold {fold_idx} 失败: {e}")
@@ -465,10 +477,11 @@ def _run_cross_fitting(data_name:str,
             test_h1_per_fold.append(h1_t.cpu().numpy())
             test_h0_per_fold.append(h0_t.cpu().numpy())
 
-        moment_risk, n_eval = _compute_unified_h_score(trainer, model, dataset, eval_fold_indices)
+        moment_risk, moment_risk_u, n_eval = _compute_unified_h_scores(trainer, model, dataset, eval_fold_indices)
         fold_diagnostics.append({
             "fold": fold_idx,
             "moment_risk": moment_risk,
+            "moment_risk_u": moment_risk_u,
             "n_eval": n_eval,
             "best_epoch": fold_train_result.best_epoch,
             "stopped_early": fold_train_result.stopped_early,

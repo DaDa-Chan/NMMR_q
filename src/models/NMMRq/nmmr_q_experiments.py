@@ -57,6 +57,15 @@ def _compute_unified_q_score(trainer,
                              model: torch.nn.Module,
                              dataset,
                              indices: List[int]) -> Tuple[float, int]:
+    """V-statistic unified score (see _compute_unified_q_scores); returns (score_v, n)."""
+    score_v, _, n = _compute_unified_q_scores(trainer, model, dataset, indices)
+    return score_v, n
+
+
+def _compute_unified_q_scores(trainer,
+                              model: torch.nn.Module,
+                              dataset,
+                              indices: List[int]) -> Tuple[float, float, int]:
     """
     Unified HPO scoring metric for Q (plan section 5.4): regardless of
     whether this candidate trained with the U- or V-statistic objective,
@@ -68,9 +77,14 @@ def _compute_unified_q_score(trainer,
     heuristic fitted on the trainer's gradient-training subset, multiplier
     fixed at 1), NOT the candidate's own training kernel, so scores are
     comparable across candidates with different kernel_bandwidth_multiplier.
+
+    Returns (score_v, score_u, n). score_v is the ranking metric above;
+    score_u is the same quantity with the U-statistic (diagonal removed),
+    recorded alongside it (实验计划 v2 section 3.3) but not used for ranking.
     """
     view = _build_dataset_view(dataset, indices)
     scorer = NMMR_Q_Loss(use_u_statistic=False)
+    scorer_u = NMMR_Q_Loss(diag_tau=0.0)
     with torch.no_grad():
         A = view.A.to(trainer.device)
         W = view.W.to(trainer.device)
@@ -79,21 +93,25 @@ def _compute_unified_q_score(trainer,
 
         k_matrix = trainer._compute_reference_kernel_matrix(W, X)
         score_total = torch.zeros((), device=trainer.device)
+        score_total_u = torch.zeros((), device=trainer.device)
 
         mask0 = (A < 0.5).squeeze()
         if mask0.sum() > 0:
             inputs0 = torch.cat((Z[mask0], X[mask0]), dim=1)
             pred0 = model.net0(inputs0)
             score_total = score_total + scorer(pred0, mask0, k_matrix)
+            score_total_u = score_total_u + scorer_u(pred0, mask0, k_matrix)
 
         mask1 = (A > 0.5).squeeze()
         if mask1.sum() > 0:
             inputs1 = torch.cat((Z[mask1], X[mask1]), dim=1)
             pred1 = model.net1(inputs1)
             score_total = score_total + scorer(pred1, mask1, k_matrix)
+            score_total_u = score_total_u + scorer_u(pred1, mask1, k_matrix)
 
     unified_score = 0.5 * score_total
-    return float(unified_score.item()), len(indices)
+    unified_score_u = 0.5 * score_total_u
+    return float(unified_score.item()), float(unified_score_u.item()), len(indices)
 
 
 def _q_predictions_by_treatment(trainer, model, dataset, indices) -> Dict[int, np.ndarray]:
@@ -287,7 +305,7 @@ def _run_optuna_tuning(
                 q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
 
                 # Unified V-statistic score (plan 5.4), on the untouched score fold.
-                fold_score, fold_n = _compute_unified_q_score(
+                fold_score, fold_score_u, fold_n = _compute_unified_q_scores(
                     trainer, model, dataset, score_idx.tolist()
                 )
                 # Plan 5.8: NaN/Inf score is a failure, not a value to average in.
@@ -299,7 +317,7 @@ def _run_optuna_tuning(
                 fold_train_seconds.append(train_result.train_seconds)
                 fold_records.append(build_fold_record(
                     fold_idx, fold_init_seed, fold_shuffle_seed, current_params, fold_score, train_result,
-                    failure_reason=None, extra=_q_distribution_stats(q_by_treatment),
+                    failure_reason=None, extra={"score_u": fold_score_u, **_q_distribution_stats(q_by_treatment)},
                 ))
 
             except Exception as e:
@@ -538,10 +556,11 @@ def _run_cross_fitting(data_name:str,
             test_q0_per_fold.append(q0_t.cpu().numpy())
             test_q1_per_fold.append(q1_t.cpu().numpy())
 
-        moment_risk, n_eval = _compute_unified_q_score(trainer, model, dataset, eval_fold_indices)
+        moment_risk, moment_risk_u, n_eval = _compute_unified_q_scores(trainer, model, dataset, eval_fold_indices)
         fold_diagnostics.append({
             "fold": fold_idx,
             "moment_risk": moment_risk,
+            "moment_risk_u": moment_risk_u,
             "n_eval": n_eval,
             "best_epoch": fold_train_result.best_epoch,
             "stopped_early": fold_train_result.stopped_early,

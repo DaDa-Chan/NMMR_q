@@ -826,12 +826,12 @@ def reevaluate_candidate_with_seeds(
     model_kind, _ = method_id.split("-")
     if model_kind == "Q":
         from src.models.NMMRq.nmmr_q_experiments import (
-            _create_trainer, _compute_unified_q_score as compute_score,
+            _create_trainer, _compute_unified_q_scores as compute_scores,
             _q_predictions_by_treatment, _q_distribution_stats,
         )
     else:
         from src.models.NMMRh.nmmr_h_experiments import (
-            _create_trainer, _compute_unified_h_score as compute_score,
+            _create_trainer, _compute_unified_h_scores as compute_scores,
         )
     from torch.utils.data import DataLoader, Subset
     from src.utils import empty_device_cache, get_device
@@ -896,7 +896,7 @@ def reevaluate_candidate_with_seeds(
                     q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
                     q_stats = _q_distribution_stats(q_by_treatment)
 
-                score, n = compute_score(trainer, model, dataset, score_idx.tolist())
+                score, score_u, n = compute_scores(trainer, model, dataset, score_idx.tolist())
                 if not math.isfinite(score):
                     record_failure(fold_idx, init_seed, "nonfinite_score", train_result, extra=q_stats)
                     any_failure = True
@@ -907,7 +907,7 @@ def reevaluate_candidate_with_seeds(
                 train_seconds.append(train_result.train_seconds)
                 fold_records.append(build_fold_record(
                     fold_idx, fold_init_seed, None, params, score, train_result,
-                    failure_reason=None, extra={"round2_seed": init_seed, "n_score": n, **q_stats},
+                    failure_reason=None, extra={"round2_seed": init_seed, "n_score": n, "score_u": score_u, **q_stats},
                 ))
             except Exception as e:
                 record_failure(fold_idx, init_seed, f"exception: {e}")
