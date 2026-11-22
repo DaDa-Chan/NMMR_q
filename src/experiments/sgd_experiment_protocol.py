@@ -88,7 +88,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
 from src.data.ate.data_class import SGDDataset
-from src.models.experiment_common import _get_a_labels
+from src.models.experiment_common import _get_a_labels, output_clip_levels
 from src.models.hpo_protocol import (
     FrozenConfig,
     _dataframe_sha256,
@@ -118,15 +118,30 @@ from .scenarios import ScenarioSpec, get_scenario
 # 14-column quadratic feature set), and 2sls (section 8: two-stage least
 # squares reusing that same propensity/OLS machinery). RKHS/S2-S4 remain
 # out of scope.
-ALLOWED_METHODS: Tuple[str, ...] = ("oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "ls", "ls_qf", "2sls")
+ALLOWED_METHODS: Tuple[str, ...] = (
+    "oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "nmmr_c", "nmmr_u_clip", "nmmr_v_clip",
+    "ls", "ls_qf", "2sls",
+)
+# Neural MMR methods (实验计划 v2 section 2.1). nmmr_c is the corrected method
+# (diagonal weight tau = 1/(n_train-1) plus output clipping) and reuses the
+# H-V/Q-V frozen configs (decision D1); nmmr_u_clip / nmmr_v_clip are NMMR-U /
+# NMMR-V plus output clipping only. nmmr_v_clip differs from nmmr_c only in the
+# diagonal weight, so it isolates that effect (small-scale check); nmmr_u_clip
+# separates clipping from the diagonal weight on the U side.
+NMMR_METHODS: Tuple[str, ...] = ("nmmr_u", "nmmr_v", "nmmr_c", "nmmr_u_clip", "nmmr_v_clip")
 # Only these methods read a FrozenConfig -- oracle uses the scenario
 # registry's analytical truth, parametric_proximal/ls/ls_qf/2sls only ever
 # use the correct/naive functional FORM (parameters are estimated per fold, never frozen).
-METHODS_REQUIRING_FROZEN_CONFIG: Tuple[str, ...] = ("nmmr_u", "nmmr_v")
+METHODS_REQUIRING_FROZEN_CONFIG: Tuple[str, ...] = NMMR_METHODS
 METHOD_FROZEN_IDS: Dict[str, Tuple[str, str]] = {
     "nmmr_u": ("H-U", "Q-U"),
     "nmmr_v": ("H-V", "Q-V"),
+    "nmmr_c": ("H-V", "Q-V"),
+    "nmmr_u_clip": ("H-U", "Q-U"),
+    "nmmr_v_clip": ("H-V", "Q-V"),
 }
+# Methods whose networks clip their outputs at output_clip_levels(n).
+CLIPPED_METHODS: Tuple[str, ...] = ("nmmr_c", "nmmr_u_clip", "nmmr_v_clip")
 # "ls"/"ls_qf"/"2sls" are each requested as ONE CLI token but always expand
 # into their two pre-defined propensity variants (plan/p0_e1_e2/
 # NEXT_IMPLEMENTATION_PROMPT.md section 3/4) -- never a single row, never
@@ -141,7 +156,7 @@ _VARIANT_EXPANDED_METHODS: Tuple[str, ...] = ("ls", "ls_qf", "2sls")
 # init_seed) 派生"); scenario/repetition are already baked into the
 # RepetitionSeeds this is derived from.
 _SCENARIO_ORDINALS: Dict[str, int] = {"S1": 1, "S2": 2, "S3": 3, "S4": 4}
-_METHOD_TAGS: Dict[str, int] = {"nmmr_u": 101, "nmmr_v": 102}
+_METHOD_TAGS: Dict[str, int] = {"nmmr_u": 101, "nmmr_v": 102, "nmmr_c": 103, "nmmr_u_clip": 104, "nmmr_v_clip": 105}
 _BRIDGE_TAGS: Dict[str, int] = {"H": 1, "Q": 0}
 
 RESULT_ROW_KEY_COLUMNS: List[str] = ["run_stage", "scenario", "n", "repetition", "method", "variant"]
@@ -1026,6 +1041,24 @@ def run_2sls_method(
 # NMMR-U/V dispatch
 # ---------------------------------------------------------------------------
 
+def nmmr_method_param_overrides(method: str, n: int) -> Dict[str, Any]:
+    """
+    Per-method train_params overrides applied on top of the frozen config
+    (实验计划 v2 section 2.1/2.3). n is the repetition's training sample size,
+    which sets the clipping levels via output_clip_levels(n). Returns the same
+    overrides for H and Q (each network only reads its own clip key).
+    """
+    if method not in NMMR_METHODS:
+        raise ValueError(f"Unknown NMMR method {method!r}; expected one of {NMMR_METHODS}.")
+    overrides: Dict[str, Any] = {}
+    if method in CLIPPED_METHODS:
+        b_q, b_h = output_clip_levels(n)
+        overrides.update(q_output_clip=b_q, h_output_clip=b_h)
+    if method == "nmmr_c":
+        overrides.update(diag_weight_rule="corrected", use_u_statistic=False, loss_name="diag_corrected")
+    return overrides
+
+
 def run_nmmr_method(
     method: str,
     train_dataset: Any,
@@ -1045,6 +1078,9 @@ def run_nmmr_method(
 
     q_init_seed = _derive_bridge_init_seed(rep_seeds.init_seed, method, "Q")
     h_init_seed = _derive_bridge_init_seed(rep_seeds.init_seed, method, "H")
+    overrides = nmmr_method_param_overrides(method, len(train_dataset))
+    q_train_params = {**q_train_params, **overrides}
+    h_train_params = {**h_train_params, **overrides}
 
     _, _, q_oof, q_fold_diag, q_test = run_cf_q(
         data_name="sgd", dataset=train_dataset, n_splits=fold_plan.n_splits,
@@ -1109,6 +1145,31 @@ def _make_fold_diag_row(method_id: str, bridge_type: str, fold_id: int, **kwargs
     return row
 
 
+def compute_clip_diagnostics(method: str, n: int, preds: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Share of predictions at or beyond the planned clipping levels
+    output_clip_levels(n) (实验计划 v2 section 2.3), over the OOF and test
+    predictions of both bridges. For a clipped method this is the fraction of
+    clipped predictions; for any other method it is the fraction that WOULD
+    have been clipped, so the plan's "clipping is inactive" premise can be
+    checked for every method. A relative tolerance of 1e-6 counts values
+    sitting exactly on the clip level.
+    """
+    b_q, b_h = output_clip_levels(n)
+    q_all = np.concatenate([np.asarray(preds[k], dtype=float).reshape(-1)
+                            for k in ("q_observed_oof", "q0_test", "q1_test")])
+    h_all = np.concatenate([np.asarray(preds[k], dtype=float).reshape(-1)
+                            for k in ("h0_oof", "h1_oof", "h0_test", "h1_test")])
+    tol = 1.0 - 1e-6
+    return {
+        "clipping_applied": method in CLIPPED_METHODS,
+        "q_clip_level": b_q,
+        "h_clip_level": b_h,
+        "q_clip_frac": float(np.mean(q_all >= b_q * tol)),
+        "h_clip_frac": float(np.mean(np.abs(h_all) >= b_h * tol)),
+    }
+
+
 def compute_method_results(
     method: str,
     variant: str,
@@ -1155,7 +1216,7 @@ def compute_method_results(
         preds = run_ls_qf_method(train_dataset, test_dataset, fold_plan, scenario, variant)
     elif method == "2sls":
         preds = run_2sls_method(train_dataset, test_dataset, fold_plan, scenario, variant)
-    elif method in ("nmmr_u", "nmmr_v"):
+    elif method in NMMR_METHODS:
         preds = run_nmmr_method(
             method, train_dataset, test_dataset, fold_plan, rep_seeds, h_train_params, q_train_params,
         )
@@ -1170,7 +1231,7 @@ def compute_method_results(
     _require_finite("h1_test", preds["h1_test"])
     _require_finite("q0_test", preds["q0_test"])
     _require_finite("q1_test", preds["q1_test"])
-    if method in ("nmmr_u", "nmmr_v"):
+    if method in NMMR_METHODS:
         # held-out moment risk is a training diagnostic specific to NMMR's
         # own fold_diagnostics shape; parametric_proximal/oracle don't have it.
         for d in preds["fold_diagnostics_h"] + preds["fold_diagnostics_q"]:
@@ -1212,6 +1273,7 @@ def compute_method_results(
     q_mae_a1 = compute_bridge_mae(preds["q1_test"], true_q1)
 
     q_diag = compute_q_distribution_diagnostics(np.concatenate([preds["q0_test"], preds["q1_test"]]))
+    clip_diag = compute_clip_diagnostics(method, len(train_dataset), preds)
 
     # Fixed, finite-dimensional independent-test-set moments (plan/p0_e1_e2/
     # NEXT_IMPLEMENTATION_PROMPT.md section 3) -- diagnostic only, never a
@@ -1247,6 +1309,7 @@ def compute_method_results(
         "q_mae_a0": q_mae_a0, "q_mae_a1": q_mae_a1, "q_mae": (q_mae_a0 + q_mae_a1) / 2.0,
         **h_moments, **q_moments,
         **q_diag,
+        **clip_diag,
     }
     effect_row = {
         "tau_por": effect["tau_por"], "tau_pipw": effect["tau_pipw"], "tau_pdr": effect["tau_pdr"],
@@ -1256,7 +1319,7 @@ def compute_method_results(
     }
 
     fold_diag_rows: List[Dict[str, Any]] = []
-    if method in ("nmmr_u", "nmmr_v"):
+    if method in NMMR_METHODS:
         for bridge_type, diags in (("H", preds["fold_diagnostics_h"]), ("Q", preds["fold_diagnostics_q"])):
             for d in diags:
                 fold_diag_rows.append(_make_fold_diag_row(
@@ -1378,6 +1441,17 @@ def build_run_config(
             "q_moment_features_per_treatment_level": list(Q_MOMENT_FEATURE_NAMES),
         },
     }
+    nmmr_in_run = [m for m in methods if m in NMMR_METHODS]
+    if nmmr_in_run:
+        # Reproducibility record of the neural-method settings (实验计划 v2
+        # sections 2.1, 2.3, 3.2); the values live in code, not in a CLI flag.
+        config["nmmr_settings"] = {
+            "checkpoint_criterion": "u_statistic (trainer default; see resolve_checkpoint_criterion)",
+            "frozen_config_ids": {m: list(METHOD_FROZEN_IDS[m]) for m in nmmr_in_run},
+            "clipped_methods": [m for m in nmmr_in_run if m in CLIPPED_METHODS],
+            "output_clip_rule": "B_q = 10*log(n)/log(500), B_h = 20*sqrt(log(n)/log(500)), n = repetition training size",
+            "nmmr_c_overrides": "diag_weight_rule=corrected (tau = 1/(n_train-1)), loss_name=diag_corrected, plus output clipping",
+        }
     if "ls" in methods:
         # Fixed-ahead-of-time cfP settings (plan/p0_e1_e2/
         # NEXT_IMPLEMENTATION_PROMPT.md section 1) recorded here purely for
