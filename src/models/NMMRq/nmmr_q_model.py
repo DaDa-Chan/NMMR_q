@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 
+from src.models.experiment_common import read_output_clip
+
+
 class NMMR_Q_common(nn.Module):
     
     def __init__(self, input_dim, train_params):
@@ -17,6 +20,9 @@ class NMMR_Q_common(nn.Module):
             else:
                 self.layer_list.append(nn.Linear(self.network_width, self.network_width))
         self.layer_list.append(nn.Linear(self.network_width, 1))
+        # Optional upper clip B for the (non-negative) softplus output, so q lies in [0, B].
+        # None (the default, also for configs without the key) leaves the output unchanged.
+        self.output_clip = read_output_clip(train_params, "q_output_clip")
         self.initialize_weights()
         
     def initialize_weights(self):
@@ -33,6 +39,8 @@ class NMMR_Q_common(nn.Module):
             x = torch.nn.functional.leaky_relu(layer(x))       
         x = self.layer_list[-1](x)
         x = torch.nn.functional.softplus(x)          
+        if self.output_clip is not None:
+            x = torch.clamp(x, max=self.output_clip)
         return x
 
 class NMMR_Q_DualModel(nn.Module):

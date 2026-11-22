@@ -88,6 +88,34 @@ def resolve_diag_tau(train_params: Dict[str, Any], n_train: int) -> Optional[flo
     return float(train_params['diag_alpha']) / (batch_size - 1)
 
 
+def read_output_clip(train_params, key):
+    """
+    Optional output-clipping level from train_params[key] (实验计划 v2 section 2.3).
+    None (or a missing key) disables clipping; otherwise a positive float.
+    """
+    value = train_params.get(key)
+    if value is None:
+        return None
+    value = float(value)
+    if not value > 0:
+        raise ValueError(f"{key} must be a positive number or None, got {value!r}.")
+    return value
+
+
+def output_clip_levels(n: int, q_base: float = 10.0, h_base: float = 20.0, n_ref: int = 500) -> Tuple[float, float]:
+    """
+    Output-clipping levels of 实验计划 v2 section 2.3 for sample size n:
+        B_q = q_base * log(n) / log(n_ref),   B_h = h_base * sqrt(log(n) / log(n_ref)).
+    They grow slowly with n (the theory needs B_n -> infinity) and are chosen
+    to be inactive on the S1 scenario for n >= n_ref. The caller passes them
+    to the trainers as train_params["q_output_clip"] / ["h_output_clip"].
+    """
+    if n < 2:
+        raise ValueError("output_clip_levels needs n >= 2.")
+    ratio = math.log(n) / math.log(n_ref)
+    return q_base * ratio, h_base * math.sqrt(ratio)
+
+
 def check_loss_name_matches_u_statistic(train_params: Dict[str, Any]) -> None:
     """
     Guard against a config where `loss_name` and `use_u_statistic` disagree
