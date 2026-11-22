@@ -5,9 +5,37 @@ and 12.2). These take plain numpy arrays only, so they can be unit-tested
 against hand-computed examples without touching any model or dataset code,
 and reused identically by P0/E1/E2.
 """
+from statistics import NormalDist
 from typing import Any, Dict
 
 import numpy as np
+
+
+def compute_influence_ci(scores: np.ndarray, level: float = 0.95) -> Dict[str, float]:
+    """
+    Cross-fitted influence-function variance and Wald interval for an effect
+    estimate that is the mean of per-sample scores (余项速率的原始条件.md,
+    Lemma P.7):
+        tau_hat = mean(phi_i),  V_hat = mean((phi_i - tau_hat)^2),
+        se = sqrt(V_hat / n),   CI = tau_hat -/+ z_{1-(1-level)/2} * se.
+    Each phi_i must be the score of sample i under bridges fitted WITHOUT
+    sample i (out-of-fold predictions), which is what compute_effect_scores
+    receives. Only second moments are used; no fold-wise adjustment is needed.
+    """
+    scores = np.asarray(scores, dtype=float).reshape(-1)
+    n = scores.size
+    if n < 2:
+        raise ValueError("compute_influence_ci: need at least 2 scores.")
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"compute_influence_ci: level must be in (0, 1); got {level}.")
+    tau_hat = float(np.mean(scores))
+    var_hat = float(np.mean((scores - tau_hat) ** 2))
+    se = float(np.sqrt(var_hat / n))
+    z = NormalDist().inv_cdf(1.0 - (1.0 - level) / 2.0)
+    return {
+        "tau": tau_hat, "var": var_hat, "se": se,
+        "ci_lower": tau_hat - z * se, "ci_upper": tau_hat + z * se,
+    }
 
 
 def compute_effect_scores(
@@ -57,7 +85,7 @@ def compute_effect_scores(
     pipw_scores = weight * q_observed * y
     pdr_scores = weight * q_observed * (y - h_observed) + (h1 - h0)
 
-    return {
+    result = {
         "por_scores": por_scores,
         "pipw_scores": pipw_scores,
         "pdr_scores": pdr_scores,
@@ -65,6 +93,17 @@ def compute_effect_scores(
         "tau_pipw": float(np.mean(pipw_scores)),
         "tau_pdr": float(np.mean(pdr_scores)),
     }
+    # 95% influence-function interval for PDR only (实验计划 v2 section 3.4):
+    # POR/PIPW have no matching sqrt(n) theory here and are compared as point
+    # estimates. Needs n >= 2; with n == 1 the interval fields are NaN.
+    if n >= 2:
+        ci = compute_influence_ci(pdr_scores, level=0.95)
+        result.update(var_pdr=ci["var"], se_pdr=ci["se"],
+                      ci_lower_pdr=ci["ci_lower"], ci_upper_pdr=ci["ci_upper"])
+    else:
+        result.update(var_pdr=float("nan"), se_pdr=float("nan"),
+                      ci_lower_pdr=float("nan"), ci_upper_pdr=float("nan"))
+    return result
 
 
 def compute_bridge_mse(pred: np.ndarray, true: np.ndarray) -> float:

@@ -173,6 +173,40 @@ def _build_bridge_summary(
     return pd.DataFrame(rows, columns=columns)
 
 
+_INTERVAL_COLUMNS: Tuple[str, ...] = ("coverage", "mcse_coverage", "mean_ci_length", "mean_se", "se_sd_ratio")
+_NAN_INTERVAL: Dict[str, float] = {c: float("nan") for c in _INTERVAL_COLUMNS}
+
+
+def _pdr_interval_summary(group_effect: pd.DataFrame, true_ate: float, sd: float) -> Dict[str, float]:
+    """
+    Coverage summary of the per-repetition 95% PDR intervals (实验计划 v2 E4):
+    coverage of the true ATE, its Monte Carlo SE sqrt(p(1-p)/R), mean interval
+    length, mean estimated SE and its ratio to the across-repetition SD.
+    NaN when the interval columns are absent (results produced before they
+    were recorded) or no repetition has a finite interval.
+    """
+    needed = ("se_pdr", "ci_lower_pdr", "ci_upper_pdr")
+    if any(col not in group_effect.columns for col in needed):
+        return dict(_NAN_INTERVAL)
+    lo = group_effect["ci_lower_pdr"].astype(float).to_numpy()
+    hi = group_effect["ci_upper_pdr"].astype(float).to_numpy()
+    se = group_effect["se_pdr"].astype(float).to_numpy()
+    ok = np.isfinite(lo) & np.isfinite(hi) & np.isfinite(se)
+    if not ok.any():
+        return dict(_NAN_INTERVAL)
+    covered = (lo[ok] <= true_ate) & (true_ate <= hi[ok])
+    p = float(np.mean(covered))
+    r = int(ok.sum())
+    mean_se = float(np.mean(se[ok]))
+    return {
+        "coverage": p,
+        "mcse_coverage": float(np.sqrt(p * (1.0 - p) / r)),
+        "mean_ci_length": float(np.mean(hi[ok] - lo[ok])),
+        "mean_se": mean_se,
+        "se_sd_ratio": mean_se / sd if np.isfinite(sd) and sd > 0 else float("nan"),
+    }
+
+
 def _build_effect_summary(
     effect: pd.DataFrame, failures: pd.DataFrame, groups: List[Dict[str, Any]], planned_repetitions: int,
     scenario_true_ate: Dict[str, float],
@@ -210,17 +244,20 @@ def _build_effect_summary(
                     sd = float("nan")
                     mcse_bias = float("nan")
                 row.update(mean=mean, bias=bias, abs_bias=abs(bias), sd=sd, rmse=rmse, mcse_bias=mcse_bias)
+                row.update(_pdr_interval_summary(group_effect, true_ate, sd) if estimator == "PDR" else _NAN_INTERVAL)
             else:
                 row.update(
                     mean=float("nan"), bias=float("nan"), abs_bias=float("nan"),
                     sd=float("nan"), rmse=float("nan"), mcse_bias=float("nan"),
                 )
+                row.update(_NAN_INTERVAL)
             rows.append(row)
 
     columns = [
         *GROUP_KEYS, "estimator", "true_ate",
         "attempts", "successes", "failures", "failure_rate",
         "mean", "bias", "abs_bias", "sd", "rmse", "mcse_bias",
+        *_INTERVAL_COLUMNS,
         "median_time", "p90_time",
     ]
     return pd.DataFrame(rows, columns=columns)

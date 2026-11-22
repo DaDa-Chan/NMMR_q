@@ -1250,6 +1250,7 @@ def compute_method_results(
     }
     effect_row = {
         "tau_por": effect["tau_por"], "tau_pipw": effect["tau_pipw"], "tau_pdr": effect["tau_pdr"],
+        "se_pdr": effect["se_pdr"], "ci_lower_pdr": effect["ci_lower_pdr"], "ci_upper_pdr": effect["ci_upper_pdr"],
         "h_train_seconds": h_train_seconds, "q_train_seconds": q_train_seconds,
         "evaluation_seconds": evaluation_seconds, "total_seconds": total_seconds,
     }
