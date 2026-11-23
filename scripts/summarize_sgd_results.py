@@ -1,6 +1,5 @@
 """
-CLI entry for read-only P0/E1/E2 SGD result summarization
-(plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md "实现 P0/E1/E2 汇总程序"). This
+CLI entry for read-only P0/E1/E2 SGD result summarization. This
 script only parses `--results_dir`, calls
 `src.experiments.reporting.summarize_sgd_results`, and prints where the
 three summary files were written -- the actual summarization logic lives

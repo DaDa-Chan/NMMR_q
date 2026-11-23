@@ -25,8 +25,8 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
     加载并合并配置文件。
     它从 JSON 文件中提取特定数据集的数据配置和通用的训练参数。
 
-    This entrypoint only runs fixed-parameter training/evaluation (pilot HPO
-    fix request item 8): hyperparameter search happens exclusively in
+    This entrypoint only runs fixed-parameter training/evaluation;
+    hyperparameter search happens exclusively in
     scripts/run_pilot_protocol.py and ends in a frozen config. If the given
     config still has an Optuna search space (e.g. the un-tuned
     configs/sgd/nmmr_q/nmmr_q_u_sgd.json rather than a frozen config), this
@@ -62,7 +62,7 @@ def load_configs(config_path_str: str, dataset_name: str) -> Tuple[Dict, Dict]:
 
 def load_data_configs_only(config_path_str: str, dataset_name: str) -> Dict:
     """
-    For mode='traditional' (精简与config管理.md Phase D): --config_path now
+    For mode='traditional': --config_path
     only supplies DGP/data settings (sample size, data seed, scenario) --
     train_params for this mode comes from --frozen_config_path instead, via
     hpo_protocol.FrozenConfig. Unlike load_configs(), this intentionally
@@ -87,7 +87,7 @@ def load_data_configs_only(config_path_str: str, dataset_name: str) -> Dict:
 def load_frozen_config_for_standalone(frozen_config_path_str: str, model_name: str) -> Dict:
     """
     For mode='traditional': load and validate a user-selected, already
-    pilot-confirmed HPO FrozenConfig (精简与config管理.md Phase D). Parses
+    pilot-confirmed HPO FrozenConfig. Parses
     exclusively via hpo_protocol.FrozenConfig -- never re-implements its
     field layout here -- and returns the resolved train_params via
     to_train_params(). Checks (and raises a clear error on failure):

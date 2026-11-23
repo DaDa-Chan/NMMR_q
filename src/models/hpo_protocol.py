@@ -2,15 +2,8 @@
 HPO protocol orchestration: pilot data roles, the two-round Optuna
 selection process, and the candidate-config artifact.
 
-See plan/experiment_1/training_and_hpo_plan.md sections 5.1, 5.2, 6,
-plan/experiment_1/hpo_selection_plan.md (the more detailed two-round
-version of the same selection process) sections 3-10, and
-plan/experiment_1/精简与config管理.md (candidate/frozen-config separation,
-study-identity hardening, and record simplification).
-
-File layout -- everything HPO ever writes automatically lives under one
-`results_dir` per search space/run (精简与config管理.md section 3.1); HPO
-code never writes to configs/sgd_frozen/ itself:
+File layout -- everything HPO writes lives under one `results_dir` per
+search space/run; HPO code never writes to configs/sgd_frozen/ itself:
     data/pilot/{dgp_version}/scenario_{scenario}/seed_{base_seed}/
                                  select_n{n}.csv, confirm_n{n}.csv,
                                  manifest.json -- sample-size-keyed so
@@ -30,8 +23,7 @@ code never writes to configs/sgd_frozen/ itself:
                                  recorded INSIDE the candidate itself).
     configs/sgd_frozen/          only ever written to by a human, who
                                  manually copies a passed candidate here
-                                 once they've checked it (see
-                                 plan section 4.3) -- no function in this
+                                 once they've checked it -- no function in this
                                  module writes to this directory.
 
 Callers (and tests) that want output kept out of the real data/pilot or
@@ -72,7 +64,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # in directly.
 METHOD_IDS = ("H-U", "H-V", "Q-U", "Q-V")
 _METHOD_ID_TO_INT = {method_id: i for i, method_id in enumerate(METHOD_IDS)}
-DEFAULT_ROUND2_INIT_SEEDS = (11, 22, 33)  # plan hpo_selection_plan.md section 7
+DEFAULT_ROUND2_INIT_SEEDS = (11, 22, 33)
 
 
 def validate_method_ids(methods: List[str]) -> List[str]:
@@ -114,11 +106,9 @@ def pilot_data_dir() -> Path:
 
 def frozen_config_dir() -> Path:
     """
-    Where a USER manually promotes a passed candidate to (精简与config管理.md
-    section 3.2/4.3), alongside configs/sgd, configs/rhc. No function in
-    this module ever writes here -- it exists purely as a path a human
-    copies a candidate_config.json to by hand, after checking
-    confirm_status=="passed" and everything else section 4.3 asks for.
+    Where a user manually promotes a passed candidate to, alongside
+    configs/sgd and configs/rhc. No function in this module writes here; a
+    human copies a candidate_config.json here after checking it passed.
     """
     return PROJECT_ROOT / "configs" / "sgd_frozen"
 
@@ -131,9 +121,7 @@ def tune_results_dir() -> Path:
 def candidate_config_path(method_id: str, base_dir: Optional[Path] = None) -> Path:
     """
     The ONE place HPO ever writes this method's selected candidate --
-    regardless of whether pilot-confirm passed or failed (精简与config管理.md
-    section 4.1: "无论 confirm 通过还是失败，都只将 candidate 保存到当前
-    results_dir/candidates/"). `confirm_status`/`confirm_failure_reasons`
+    regardless of whether pilot-confirm passed or failed. `confirm_status`/`confirm_failure_reasons`
     inside the saved FrozenConfig distinguish the two outcomes; promoting a
     passed one to configs/sgd_frozen/ is always a manual, human step.
     """
@@ -206,7 +194,7 @@ def pilot_confirm_report_path(method_id: str, base_dir: Optional[Path] = None) -
 
 
 # ---------------------------------------------------------------------------
-# Plan 5.1 / hpo_selection_plan.md section 3: pilot data roles
+# Pilot data roles
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -564,7 +552,7 @@ def generate_shared_pilot_datasets(
 
 
 # ---------------------------------------------------------------------------
-# Frozen config artifact (plan 6.2 / hpo_selection_plan.md section 10)
+# Frozen config artifact
 # ---------------------------------------------------------------------------
 
 SCORING_KERNEL_RULE = "median heuristic fitted on gradient_train, multiplier fixed at 1"
@@ -578,9 +566,8 @@ LEGACY_SCORING_KERNEL_RULE = "candidate's own training kernel (median heuristic 
 class FrozenConfig:
     """
     The immutable artifact for one method (H-U/H-V/Q-U/Q-V) once the
-    two-round selection (hpo_selection_plan.md sections 6-8) is finished.
-    This single file is both the archival record (every field the plan
-    lists) AND sufficient on its own to resume training -- see
+    two-round selection is finished. This single file is both the archival
+    record AND sufficient on its own to resume training -- see
     `to_train_params`.
     """
     method_id: str = ""
@@ -612,9 +599,9 @@ class FrozenConfig:
     split_seed: Optional[int] = None
     tuning_seed: Optional[int] = None
     optuna_sampler: str = "TPESampler"
-    # 精简与config管理.md Phase A item 4: these two are distinct and neither
-    # should be guessed from the other -- "additional" is just what THIS
-    # invocation asked _run_optuna_tuning to run; "total" is how many trials
+    # These two are distinct and neither should be guessed from the other:
+    # "additional" is just what THIS invocation asked _run_optuna_tuning to
+    # run; "total" is how many trials
     # the persisted study actually holds afterward (0 extra on top of
     # whatever was already there when storage_dir is given, or simply
     # equal to "additional" for an ephemeral in-memory study).
@@ -627,15 +614,13 @@ class FrozenConfig:
     selected_round1_trial_number: Optional[int] = None
     pure_min_round1_trial_number: Optional[int] = None
     # "provisional" until pilot-confirm has run; "confirmed" only once it has
-    # passed (pilot HPO fix request item 5/6) -- "failed" if it ran and did
-    # not pass. Every candidate, regardless of this status, is written to
-    # candidate_config_path() (精简与config管理.md section 4.1) -- promoting
+    # passed -- "failed" if it ran and did not pass. Every candidate,
+    # regardless of this status, is written to candidate_config_path(); promoting
     # a "confirmed" one to configs/sgd_frozen/ is a manual, human step, not
     # anything this module does automatically.
     status: str = "provisional"
     # confirm_status/confirm_failure_reasons mirror decide_pilot_confirm()'s
-    # own "passed"/"failed" + reasons (精简与config管理.md section 4.1: "candidate
-    # 中记录 confirm_status=passed|failed 和失败原因"), kept alongside `status`
+    # own "passed"/"failed" + reasons, kept alongside `status`
     # (this artifact's own provisional/confirmed/failed lifecycle label) so
     # the saved candidate file is self-describing without cross-referencing
     # the separate pilot_confirm_report.json.
@@ -643,16 +628,14 @@ class FrozenConfig:
     confirm_failure_reasons: List[str] = field(default_factory=list)
 
     def config_hash(self) -> str:
-        """Checksum of the frozen artifact (plan 6.2: "最终 frozen config 的校验哈希")."""
+        """Checksum of the frozen artifact."""
         payload = json.dumps(asdict(self), sort_keys=True, default=str).encode()
         return hashlib.sha256(payload).hexdigest()
 
     def to_train_params(self, model_kind: str) -> Dict[str, Any]:
         """
         Reconstruct the literal train_params dict the trainer needs from
-        this one frozen artifact (no separate "resolved params" file is
-        generated -- this is the single necessary file per plan 6.2's
-        "每个方法保存一个不可变配置文件").
+        this one frozen artifact (no separate "resolved params" file).
         """
         return {
             "model_name": "nmmr_q" if model_kind == "Q" else "nmmr_h",
@@ -685,8 +668,8 @@ class FrozenConfig:
     def load(cls, path: Path) -> "FrozenConfig":
         """
         Inverse of save(): the one place that knows this artifact's on-disk
-        field layout, so callers (e.g. experiment.py's --mode traditional,
-        精简与config管理.md Phase D) never need their own ad hoc
+        field layout, so callers (e.g. experiment.py's --mode traditional)
+        never need their own ad hoc
         field-by-field parsing of a frozen/candidate config file.
         """
         with open(path, "r") as f:
@@ -706,10 +689,7 @@ def validate_frozen_config(train_params: Dict[str, Any]) -> None:
     """
     Loading a frozen config for the FORMAL experiment must fail loudly if it
     still looks like an HPO config -- a leftover Optuna search space dict,
-    or an `hpo_n_trials` key -- rather than single resolved values. (The
-    `n_epochs += 200` hack the plan also warns about was removed entirely
-    from this codebase in Phase A; there is no longer a code path that
-    could silently reintroduce it.)
+    or an `hpo_n_trials` key -- rather than single resolved values.
     """
     _, search_space = _parse_optuna_space(train_params)
     if search_space:
@@ -723,9 +703,8 @@ def validate_frozen_config(train_params: Dict[str, Any]) -> None:
 
 def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Explicit pilot-confirm pass/fail judgment (精简与config管理.md section
-    6.5): a FIXED checklist of hard failure conditions, none of them
-    hardware/runtime-budget related --
+    Explicit pilot-confirm pass/fail judgment: a FIXED checklist of hard
+    failure conditions, none of them hardware/runtime-budget related --
       1. every fold completed with a valid best checkpoint;
       2. the ATE estimate (and every per-fold ATE) is finite;
       3. held-out moment risk is finite;
@@ -734,8 +713,7 @@ def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
     diagnostics (`q_max_abs`, quantiles, `q_a{level}_prop_gt{10,50,100}`)
     stay in the report for the reader to look at, same as per-fold/total
     training time and how often training hit max_epochs, but none of
-    these gate pass/fail (plan: "不把硬件速度、每 epoch 耗时等运维信息作为
-    统计方法的通过门槛"). Returns {"status": "passed"|"failed",
+    these gate pass/fail. Returns {"status": "passed"|"failed",
     "failure_reasons": [...]}. Only a "passed" status may ever produce a
     confirmed candidate.
     """
@@ -760,7 +738,7 @@ def decide_pilot_confirm(report: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_trial_table(study, method_id: Optional[str] = None) -> pd.DataFrame:
     """
-    One row per (trial, fold) -- pilot HPO fix request item 7: every field
+    One row per (trial, fold) with every field
     a fold's outcome needs for audit (hyperparameters, seeds, score, best
     epoch, stop reason, failure reason, etc.), not just a per-trial
     summary. A trial that failed before producing any `fold_records` (e.g.
@@ -790,7 +768,6 @@ def build_trial_table(study, method_id: Optional[str] = None) -> pd.DataFrame:
 
 # ---------------------------------------------------------------------------
 # Round 2: multi-seed re-evaluation of Round 1's finalists
-# (hpo_selection_plan.md section 7)
 # ---------------------------------------------------------------------------
 
 def reevaluate_candidate_with_seeds(
@@ -808,17 +785,16 @@ def reevaluate_candidate_with_seeds(
     `split_seed`), only the network initialization differs -- to check
     robustness to random initialization before final selection.
 
-    Pilot HPO fix request item 3: ANY seed/fold hitting a pre-specified
+    ANY seed/fold hitting a pre-specified
     failure condition (insufficient treatment groups, no valid checkpoint,
     NaN/Inf during training or in the score, a training exception) makes
-    this CANDIDATE's overall `value` +inf, same as Round 1. The previous
-    behaviour of silently dropping only the failed (seed, fold) combos and
-    averaging whatever succeeded is exactly what item 3 forbids.
+    this CANDIDATE's overall `value` +inf, same as Round 1; failed
+    (seed, fold) combos are never dropped and the rest averaged.
 
     Returns a dict with `value` (the weighted mean score, same key name
     `pick_simplest_within_one_se` expects; +inf if ANY combo failed),
     `fold_se`, `fold_sd`, `n_scores`, `total_train_seconds`,
-    `failure_reasons`, `fold_records` (item 7's per-(seed,fold) record,
+    `failure_reasons`, `fold_records` (the per-(seed,fold) record,
     including Q's distribution diagnostics -- quantiles, extreme-value
     proportions -- for Q candidates, kept for reference only; none of it
     gates this candidate's score).
@@ -1036,12 +1012,11 @@ def _search_space_sha256(search_space: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(search_space, sort_keys=True, default=str).encode()).hexdigest()
 
 
-# Fixed description of Round 1's held-out scoring rule (plan 5.4:
-# _compute_unified_q_score/_compute_unified_h_score, always V-statistic
-# moment risk regardless of this method's own training objective). Bump
+# Fixed description of Round 1's held-out scoring rule
+# (_compute_unified_q_score/_compute_unified_h_score: always the V-statistic
+# moment risk, regardless of the method's own training objective). Bump
 # this string if that scoring rule itself ever changes, so an old study
-# computed under the previous rule is never silently extended under a new
-# one (精简与config管理.md section 6.1).
+# computed under the previous rule is never silently extended under a new one.
 # v2: held-out scoring uses a fixed reference kernel (median x 1) instead of
 # each candidate's own training kernel (median x its multiplier), so scores
 # are comparable across candidates. Studies created under v1 cannot be
@@ -1062,8 +1037,7 @@ def _prepare_persistent_study(
     split_seed: Optional[int] = None,
 ) -> int:
     """
-    Pilot HPO fix (round 2) item 6 / 精简与config管理.md Phase A item 3: the
-    FIRST time a study is created at (storage, study_name), record its full
+    The FIRST time a study is created at (storage, study_name), record its full
     identity -- method_id, pilot-select file SHA-256, search-space
     SHA-256, plus every training/scoring setting that changes whether
     trials are even comparable (n_splits, n_epochs, patience,
@@ -1077,7 +1051,7 @@ def _prepare_persistent_study(
 
     Also returns the trial count already stored (0 for a brand new study),
     for the "Existing trials / Additional trials requested / Expected
-    total" log (item 5).
+    total" log.
     """
     import optuna
 
@@ -1119,7 +1093,6 @@ def _prepare_persistent_study(
 
 # ---------------------------------------------------------------------------
 # Full two-round selection for one method, and all four methods together
-# (plan 5.2 / hpo_selection_plan.md sections 4, 6-8)
 # ---------------------------------------------------------------------------
 
 def run_hpo_study_for_method(
@@ -1140,18 +1113,18 @@ def run_hpo_study_for_method(
 ) -> Tuple[FrozenConfig, pd.DataFrame, pd.DataFrame]:
     """
     Full two-round selection for ONE method (H-U, H-V, Q-U, or Q-V -- never
-    mixed with another method's trials, plan 5.2), on the shared
+    mixed with another method's trials), on the shared
     `pilot_select_dataset` so all four methods are compared on identical
     data:
 
-    Round 1 (hpo_selection_plan.md section 6): one independent Optuna study,
+    Round 1: one independent Optuna study,
       `n_trials` candidates, each scored by the unified held-out moment risk
       averaged over `n_splits` folds (single initialization per fold).
       Ranked by raw mean score; keep the best `top_k`.
-    Round 2 (section 7): re-evaluate each of those `top_k` candidates across
+    Round 2: re-evaluate each of those `top_k` candidates across
       `round2_init_seeds` x `n_splits` folds (same fold IDs as Round 1, only
       initialization differs), to check robustness to random init.
-    Final selection (section 8): one-SE rule applied to Round 2's richer
+    Final selection: one-SE rule applied to Round 2's richer
       per-candidate score distribution, not Round 1's single-seed score.
 
     Multi-sample-size mode: when
@@ -1189,7 +1162,7 @@ def run_hpo_study_for_method(
     # (validate_frozen_config/to_train_params expect single resolved values).
     base_train_params = {k: v for k, v in base_train_params.items() if k != "hpo_n_trials"}
 
-    # Pilot HPO fix request item 7 (round 2 items 5/6): persist the Optuna
+    # Persist the Optuna
     # study to SQLite when a storage_dir is given, so an interrupted run can
     # resume (load_if_exists) and ADD trials instead of starting over, and
     # guard against a different method/pilot-data/search-space silently
@@ -1214,8 +1187,7 @@ def run_hpo_study_for_method(
     print(f"[{method_id}] Expected total after this run: {existing_trial_count + n_trials}")
 
     # --- Round 1: Optuna TPE screening ---
-    # 精简与config管理.md Phase A item 1/2: the "every trial is non-finite"
-    # check itself now lives INSIDE _run_optuna_tuning, raising
+    # The "every trial is non-finite" check lives inside _run_optuna_tuning, raising
     # NoFiniteRound1TrialError BEFORE it ever prints a misleading "best
     # params" line for a value=inf trial. Nothing left to check here except
     # the degenerate "no search space at all" case (study is None).
@@ -1283,8 +1255,7 @@ def run_hpo_study_for_method(
                     "method_id": method_id, "round1_trial_number": cand["round1_trial_number"], **rec,
                 })
 
-    # One row per (candidate, seed, fold) -- pilot HPO fix request item 7 --
-    # not just one aggregate row per candidate.
+    # One row per (candidate, seed, fold), not one aggregate row per candidate.
     round2_table = pd.DataFrame(round2_fold_rows)
 
     selected, pure_min = pick_simplest_within_one_se(round2_candidates)
@@ -1336,7 +1307,7 @@ def run_hpo_study_for_method(
 # ---------------------------------------------------------------------------
 # Safe end-to-end orchestration: Round 1 -> Round 2 -> one-SE provisional
 # candidate -> pilot-confirm -> candidate saved either way, confirm_status
-# recorded inside it (精简与config管理.md section 4.1). HPO never writes to
+# recorded inside it. HPO never writes to
 # configs/sgd_frozen/; scripts/run_pilot_protocol.py loops over `--methods`
 # itself and calls run_and_confirm_method per method.
 # ---------------------------------------------------------------------------
@@ -1371,9 +1342,9 @@ def run_and_confirm_method(
     candidate to `candidate_config_path` regardless of which it is --
     nothing here ever decides to write to configs/sgd_frozen/.
 
-    Round 1 stopping with no finite-valued trial (pilot HPO fix round 2
-    item 4) propagates as a plain exception from run_hpo_study_for_method --
-    there is no provisional candidate at all in that case, so this function
+    Round 1 stopping with no finite-valued trial propagates as a plain
+    exception from run_hpo_study_for_method -- there is no provisional
+    candidate at all in that case, so this function
     does not catch it; the caller (e.g. the script's per-method loop)
     decides whether to skip this method and continue with the others.
 
@@ -1433,10 +1404,10 @@ def save_pipeline_artifacts(
     """
     Persist every method's Round 1/Round 2 tables, pilot-confirm report,
     and candidate config -- all under `results_dir`, unconditionally,
-    regardless of whether that method's pilot-confirm passed or failed
-    (精简与config管理.md section 4.1). There is no `config_dir` parameter:
-    HPO never writes to configs/sgd_frozen/ itself; a human decides which
-    candidate (if any) to copy there by hand (section 4.3).
+    regardless of whether that method's pilot-confirm passed or failed.
+    There is no `config_dir` parameter: HPO never writes to
+    configs/sgd_frozen/ itself; a human decides which candidate (if any) to
+    copy there by hand.
     """
     results_dir = Path(results_dir) if results_dir is not None else tune_results_dir()
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1453,7 +1424,7 @@ def save_pipeline_artifacts(
         if frozen.confirm_status == "passed":
             print(f"[{method_id}] pilot-confirm PASSED -> candidate saved to {candidate_path}. "
                   f"Nothing was written to {frozen_config_dir()} -- copy it there yourself "
-                  f"once you've checked it (plan section 4.3).")
+                  f"once you've checked it.")
         else:
             print(f"[{method_id}] pilot-confirm FAILED "
                   f"(failure_reasons={frozen.confirm_failure_reasons}); "
@@ -1461,16 +1432,15 @@ def save_pipeline_artifacts(
 
 
 # ---------------------------------------------------------------------------
-# Plan 6.1 / hpo_selection_plan.md section 9: pilot-confirm evaluation
+# Pilot-confirm evaluation
 # ---------------------------------------------------------------------------
 
 def _summarize_fold_diagnostics(fold_diagnostics: List[Dict[str, Any]], n_splits: int) -> Dict[str, Any]:
     """
-    Plan 6.1 / hpo_selection_plan.md section 9's pilot-confirm checklist:
-    "held-out 矩风险为有限值" / "所有折都恢复了最佳模型" / "训练时间处于可执行范围".
+    Pilot-confirm checklist: finite held-out moment risk, best model restored
+    in every fold, and training time.
 
-    `all_folds_restored_best_checkpoint` (精简与config管理.md Phase C
-    follow-up item 1) now requires BOTH that cross-fitting actually
+    `all_folds_restored_best_checkpoint` requires BOTH that cross-fitting actually
     produced the expected `n_splits` fold records AND that every one of
     them has `best_state_restored=True` -- a direct per-fold signal from
     TrainResult, not inferred indirectly from `stop_reason != "no_valid_
@@ -1506,13 +1476,10 @@ def evaluate_pilot_confirm(
     Run ONE full cross-fitting pass of `frozen_config` on pilot_confirm
     data, which never participated in this method's HPO. Returns
     diagnostics the caller uses to decide pass/freeze vs fail/back-to-HPO;
-    this function itself makes no pass/fail judgment (plan: "pilot-confirm
-    只有两种结论...不能静默挑第二名或反复查看 confirm 数据").
+    this function itself makes no pass/fail judgment.
 
-    Reports (plan 6.1 / hpo_selection_plan.md section 9, plus the fixed
-    hard-failure fields 精简与config管理.md section 6.5 needs --
-    `ate_all_finite`/`predictions_all_finite` -- decide_pilot_confirm()
-    reads from this report):
+    Reports (decide_pilot_confirm() reads the hard-failure fields
+    `ate_all_finite`/`predictions_all_finite` from this report):
     - point estimate and per-fold estimates, and whether all of them are
       finite;
     - per-fold held-out moment risk (same unified V-statistic scorer HPO
@@ -1527,7 +1494,7 @@ def evaluate_pilot_confirm(
     - (scenario 1 only -- the only DGP this repo has a verified closed-form
       true bridge for, see _true_h0_scenario1/_true_q0_scenario1) the true
       bridge MSE, reported for diagnosis ONLY, never used to reselect
-      hyperparameters (plan: "不据此更换参数").
+      hyperparameters.
     """
     model_kind, _ = frozen_config.method_id.split("-")
     resolved_train_params = frozen_config.to_train_params(model_kind)
@@ -1655,10 +1622,8 @@ def evaluate_pilot_confirm_multi_n(
 
 
 # ---------------------------------------------------------------------------
-# Scenario-1 analytical true bridge (for pilot-confirm diagnostics only --
-# plan: "不据此更换参数"). Matches src/data/ate/sgd_pv.py's scenario=1 DGP and
-# plan/experiment_1/实验计划.md section 4.1 / plan.md section 3's closed-form
-# derivation; sanity-checked against the moment condition in
+# Scenario-1 analytical true bridge (for pilot-confirm diagnostics only).
+# Matches src/data/ate/sgd_pv.py's scenario=1 DGP; sanity-checked against the moment condition in
 # local_tests/unit/test_true_bridge_scenario1.py.
 # ---------------------------------------------------------------------------
 

@@ -1,6 +1,6 @@
 """
 Weighted spectral pairing decomposition of the sieve PDR remainder at one batch
-size (paper: Proposition "Linear sieve"; theory note Section 12), plus the ATE
+size (paper: Proposition "Linear sieve"), plus the ATE
 remainder of the sample minimizer, used for the stability checks reported in
 the paper's appendix (spread across seeds, and halving N).
 
@@ -14,9 +14,8 @@ Directions are grouped by eigenvalue: 'weak' (> tau), 'mid' (FLOOR..tau),
 
     python scripts/diagnostics/sieve_jb_pairing.py --n 6000 --seeds 4 --deg 3 --b 64
 
-Ported from plan/q_diagnostics/jb_pairing.py; the computation is unchanged,
-except that the true coefficient vectors are now obtained by least squares on
-the sieve and checked to reproduce the true bridges, instead of being typed in.
+The true coefficient vectors are obtained by least squares on the sieve and
+checked to reproduce the true bridges exactly.
 """
 import argparse
 

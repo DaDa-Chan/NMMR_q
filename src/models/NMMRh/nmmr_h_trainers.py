@@ -99,11 +99,11 @@ class NMMR_H_Trainer:
         self.scaler = GradScaler() if self.use_amp else None
 
         check_loss_name_matches_u_statistic(train_params)
-        # Optional diagonal-weight rule (实验计划 v2 section 2.1); validated here,
+        # Optional diagonal-weight rule; validated here,
         # resolved to a numeric tau in train() once the training-set size is known.
         check_diag_weight_config(train_params)
         self.h_loss = NMMR_H_Loss(use_u_statistic=self.train_params.get('use_u_statistic', False))
-        # Validation score for early stopping / scheduler / best checkpoint (plan v2 section 3.2).
+        # Validation score for early stopping / scheduler / best checkpoint.
         self.checkpoint_criterion = resolve_checkpoint_criterion(train_params)
         self.h_val_loss = NMMR_H_Loss(diag_tau=0.0) if self.checkpoint_criterion == "u_statistic" else self.h_loss
 

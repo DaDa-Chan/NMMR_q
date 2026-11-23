@@ -1,5 +1,5 @@
 """
-Confirmatory analysis CLI for 实验计划 v2 (S1). Read-only over result
+Confirmatory analysis CLI for the v2 experiments on S1. Read-only over result
 directories; all logic lives in src/experiments/v2_analysis.py.
 
     python scripts/analyze_v2_confirmatory.py \

@@ -15,7 +15,6 @@ biases are evaluated on an independent sample of 200,000 points.
     python scripts/diagnostics/sieve_jb_minimizer.py --n 6000 --seeds 4 --deg 3 \
         --out results/diagnostics/sieve_jb_minimizer_deg3.csv
 
-Ported from plan/q_diagnostics/jb_minimizer.py; the computation is unchanged.
 """
 import argparse
 from pathlib import Path

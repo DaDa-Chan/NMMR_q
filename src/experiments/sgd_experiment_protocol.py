@@ -1,37 +1,24 @@
 """
-P0/E1/E2 shared SGD protocol (plan/p0_e1_e2/01_shared_protocol.md,
-plan/p0_e1_e2/02_methods.md). This module owns everything P0/E1/E2 have in
-common: scenario dispatch, repetition seeds, the A-stratified fold plan
-shared by every method, method dispatch (plain functions, no class
-hierarchy -- "oracle"/"parametric_proximal" need no model object at all,
-"nmmr_u"/"nmmr_v" dispatch against real FrozenConfigs), the pure
-effect/bridge-error computation, and writing the minimal result-file
-structure below. It never tunes hyperparameters -- Optuna runs exclusively
-in scripts/run_pilot_protocol.py. Methods implemented so far: "oracle"
-(plan/p0_e1_e2/02_methods.md section 2: the S1 scenario registry's own
-analytical true bridges, no fitting at all), "parametric_proximal"
-(section 3: the correctly-specified linear H / exponential-tilt Q proximal
-model, fit per-fold via the closed-form/moment-equation solvers in
-src/models/LINEAR/linear_model.py), "nmmr_u"/"nmmr_v" (section 4, real
-FrozenConfigs), "ls" (sections 5-6: a naive OLS H/Q baseline that
-always runs as its two pre-defined propensity variants, "oracleP" and
-"cfP", each its own row -- never rewritten as a proximal moment equation),
-"ls_qf" (same sections, NEXT_IMPLEMENTATION_PROMPT.md: the same
-oracleP/cfP propensity variants and plain-OLS machinery as "ls", but H/Q
-each regress on a fixed 14-column quadratic feature expansion instead of
-the 5-column linear one), and "2sls" (section 8: two-stage least squares --
-H's endogenous W is instrumented by Z, Q's endogenous Z (on the same
-propensity-reweighted R as ls/ls_qf) is instrumented by W; eval/test bridge
-predictions always use the ACTUAL W/Z, never the first-stage fitted
-values). RKHS/S2-S4 remain out of scope. This round additionally persists
-the minimal inputs/predictions needed to recompute POR/PIPW/PDR and the
-independent-test-set bridge moments from saved files alone (never
-retrained), and adds two fixed, finite-dimensional test moments (`effects.
-compute_h_test_moments`/`compute_q_test_moments`) -- kernel moment risk,
-formal Monte Carlo, and summary/plotting remain out of scope.
+Shared SGD protocol for P0/E1/E2: scenario dispatch, repetition seeds, the
+A-stratified fold plan shared by every method, method dispatch (plain
+functions), effect and bridge-error computation, and the result files below.
+It never tunes hyperparameters; Optuna runs only in scripts/run_pilot_protocol.py.
 
-Output layout (plan/p0_e1_e2/01_shared_protocol.md section 7, this round's
-minimal subset only -- *_summary.csv and plots are later-phase work):
+Methods:
+  oracle               analytical true bridges of the scenario, no fitting
+  parametric_proximal  correctly specified linear H / exponential-tilt Q,
+                       fit per fold (src/models/LINEAR/linear_model.py)
+  nmmr_*               neural MMR bridges from FrozenConfigs (see NMMR_METHODS)
+  ls                   naive OLS H/Q baseline, in two propensity variants
+                       (oracleP, cfP), each its own row
+  ls_qf                as ls, on a fixed 14-column quadratic feature expansion
+  2sls                 two-stage least squares: W instrumented by Z for H,
+                       Z instrumented by W for Q; predictions use the actual W/Z
+
+Saved inputs and predictions are enough to recompute POR/PIPW/PDR and the
+test-set bridge moments without retraining.
+
+Output layout:
 
     results/<run_id>/
     ├── run_config.json
@@ -110,21 +97,13 @@ from .effects import (
 )
 from .scenarios import ScenarioSpec, get_scenario
 
-# This round's explicit method scope: oracle (plan/p0_e1_e2/02_methods.md
-# section 2), parametric_proximal (section 3), nmmr_u/nmmr_v (section 4,
-# pairing H-U+Q-U / H-V+Q-V), ls (section 6, with its two propensity
-# variants -- section 5), ls_qf (same sections,
-# NEXT_IMPLEMENTATION_PROMPT.md: ls's propensity/OLS machinery with a fixed
-# 14-column quadratic feature set), and 2sls (section 8: two-stage least
-# squares reusing that same propensity/OLS machinery). RKHS/S2-S4 remain
-# out of scope.
 ALLOWED_METHODS: Tuple[str, ...] = (
     "oracle", "parametric_proximal", "nmmr_u", "nmmr_v", "nmmr_c", "nmmr_u_clip", "nmmr_v_clip",
     "ls", "ls_qf", "2sls",
 )
-# Neural MMR methods (实验计划 v2 section 2.1). nmmr_c is the corrected method
+# Neural MMR methods. nmmr_c is the corrected method
 # (diagonal weight tau = 1/(n_train-1) plus output clipping) and reuses the
-# H-V/Q-V frozen configs (decision D1); nmmr_u_clip / nmmr_v_clip are NMMR-U /
+# H-V/Q-V frozen configs; nmmr_u_clip / nmmr_v_clip are NMMR-U /
 # NMMR-V plus output clipping only. nmmr_v_clip differs from nmmr_c only in the
 # diagonal weight, so it isolates that effect (small-scale check); nmmr_u_clip
 # separates clipping from the diagonal weight on the U side.
@@ -143,18 +122,15 @@ METHOD_FROZEN_IDS: Dict[str, Tuple[str, str]] = {
 # Methods whose networks clip their outputs at output_clip_levels(n).
 CLIPPED_METHODS: Tuple[str, ...] = ("nmmr_c", "nmmr_u_clip", "nmmr_v_clip")
 # "ls"/"ls_qf"/"2sls" are each requested as ONE CLI token but always expand
-# into their two pre-defined propensity variants (plan/p0_e1_e2/
-# NEXT_IMPLEMENTATION_PROMPT.md section 3/4) -- never a single row, never
-# merged into one row. Every other method has no variant (kept as "" throughout).
+# into their two pre-defined propensity variants, one row each. Every other
+# method has no variant (kept as "" throughout).
 LS_VARIANTS: Tuple[str, ...] = ("oracleP", "cfP")
 # Methods that expand into LS_VARIANTS rows rather than a single variant="" row.
 _VARIANT_EXPANDED_METHODS: Tuple[str, ...] = ("ls", "ls_qf", "2sls")
 
 # Stable integer tags so a (scenario, method, bridge) combination always
-# derives an independent seed, regardless of call order (plan/p0_e1_e2/
-# 01_shared_protocol.md section 5: "每折初始化从 (method,repetition,fold,
-# init_seed) 派生"); scenario/repetition are already baked into the
-# RepetitionSeeds this is derived from.
+# derives an independent seed, regardless of call order; scenario and
+# repetition are already part of the RepetitionSeeds it is derived from.
 _SCENARIO_ORDINALS: Dict[str, int] = {"S1": 1, "S2": 2, "S3": 3, "S4": 4}
 _METHOD_TAGS: Dict[str, int] = {"nmmr_u": 101, "nmmr_v": 102, "nmmr_c": 103, "nmmr_u_clip": 104, "nmmr_v_clip": 105}
 _BRIDGE_TAGS: Dict[str, int] = {"H": 1, "Q": 0}
@@ -169,8 +145,7 @@ RESULT_ROW_KEY_COLUMNS: List[str] = ["run_stage", "scenario", "n", "repetition",
 @dataclass(frozen=True)
 class RepetitionSeeds:
     """The four independently-saved seeds one (scenario, n, repetition)
-    needs (plan/p0_e1_e2/00_p0_correctness.md section 3 / plan/实验计划.md
-    section 3.2)."""
+    needs."""
     data_seed: int
     test_seed: int
     split_seed: int
@@ -243,10 +218,8 @@ class FoldPlan:
 
 def build_fold_plan(dataset: Any, n_splits: int, split_seed: int) -> FoldPlan:
     """
-    The ONE A-stratified fold plan a repetition uses for both H and Q
-    (plan/p0_e1_e2/01_shared_protocol.md section 4). Every check here is
-    explicit -- this never relies on StratifiedKFold's own warnings or
-    implicit fallback behavior (Phase 1.1 item 1):
+    The one A-stratified fold plan a repetition uses for both H and Q. Every
+    check is explicit rather than relying on StratifiedKFold's warnings:
 
     1. `A` must contain both 0 and 1, and no other value.
     2. Each treatment group must have at least `n_splits` samples.
@@ -320,8 +293,7 @@ def build_fold_plan(dataset: Any, n_splits: int, split_seed: int) -> FoldPlan:
 
 def load_frozen_config(path: Path, expected_method_id: str, expected_n_splits: int) -> Tuple[FrozenConfig, Dict[str, Any]]:
     """
-    Load and validate one FrozenConfig for the formal SGD NMMR path
-    (plan/p0_e1_e2/01_shared_protocol.md section 2): `confirm_status==
+    Load and validate one FrozenConfig for the formal SGD NMMR path: `confirm_status==
     "passed"`, method id matches what the caller expects, no leftover
     search space, and `n_splits` matches this protocol run's own n_splits.
     """
@@ -352,8 +324,7 @@ def load_frozen_config(path: Path, expected_method_id: str, expected_n_splits: i
 
 
 # ---------------------------------------------------------------------------
-# Oracle: the scenario registry's own analytical true bridges, no fitting
-# (plan/p0_e1_e2/02_methods.md section 2).
+# Oracle: the scenario registry's own analytical true bridges, no fitting.
 # ---------------------------------------------------------------------------
 
 def run_oracle_method(
@@ -399,9 +370,9 @@ def run_oracle_method(
 
 # ---------------------------------------------------------------------------
 # Correctly-specified parametric proximal model: correct functional FORM,
-# parameters estimated per outer fold (plan/p0_e1_e2/02_methods.md section
-# 3). Reuses src/models/LINEAR/linear_model.py's ProximalLinearModel
-# entirely -- never re-implements its moment equations here.
+# parameters estimated per outer fold. Reuses
+# src/models/LINEAR/linear_model.py's ProximalLinearModel entirely -- never
+# re-implements its moment equations here.
 # ---------------------------------------------------------------------------
 
 def run_parametric_proximal_method(
@@ -506,15 +477,12 @@ def run_parametric_proximal_method(
 
 
 # ---------------------------------------------------------------------------
-# LS: naive OLS bridge baseline, two propensity variants
-# (plan/p0_e1_e2/02_methods.md sections 5-6). H-LS/Q-LS are plain linear
+# LS: naive OLS bridge baseline, two propensity variants. H-LS/Q-LS are plain linear
 # regressions -- NEVER rewritten as ProximalLinearModel's moment equations,
 # and Q's sign is never forced positive.
 # ---------------------------------------------------------------------------
 
-# Pre-specified, fixed-ahead-of-time cfP logistic regression settings
-# (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md section 1: "使用预先固定的
-# sklearn 设置，不运行调参"): unpenalized, lbfgs, a fixed max_iter. Never
+# Fixed cfP logistic regression settings, not tuned: unpenalized, lbfgs, a fixed max_iter. Never
 # tuned on real data; never truncated.
 _CFP_MAX_ITER = 1000
 
@@ -540,7 +508,7 @@ def _predict_ls_linear(b: np.ndarray, col2: np.ndarray, a: np.ndarray, x: np.nda
 
 def _fit_cf_propensity(w: np.ndarray, x: np.ndarray, a: np.ndarray) -> Tuple[np.ndarray, bool]:
     """
-    cfP (plan/p0_e1_e2/02_methods.md section 5): a fixed, unpenalized
+    cfP: a fixed, unpenalized
     logistic regression A ~ (1, W, X1, X2), fit fresh on these rows (this
     outer fold's OWN training rows, never eval/test). Returns (fitted
     probabilities on these SAME rows, converged). No probability
@@ -687,8 +655,7 @@ def run_ls_method(
 # ---------------------------------------------------------------------------
 # LS-QF: same propensity/OLS machinery as LS, but H/Q each regress on a
 # fixed 14-column quadratic feature expansion instead of the 5-column
-# linear one (plan/p0_e1_e2/02_methods.md section 7 /
-# NEXT_IMPLEMENTATION_PROMPT.md section 1). H-LS-QF uses (W,A,X1,X2);
+# linear one. H-LS-QF uses (W,A,X1,X2);
 # Q-LS-QF uses (Z,A,X1,X2) on the SAME propensity-reweighted pseudo-outcome
 # R as LS. Never A^2 (binary A has A^2==A); never a repeated interaction.
 # ---------------------------------------------------------------------------
@@ -863,8 +830,7 @@ def run_ls_qf_method(
 
 # ---------------------------------------------------------------------------
 # 2SLS: two-stage least squares, reusing LS/LS-QF's propensity and OLS
-# machinery (plan/p0_e1_e2/02_methods.md section 8 /
-# NEXT_IMPLEMENTATION_PROMPT.md). H-2SLS instruments endogenous W with Z;
+# machinery. H-2SLS instruments endogenous W with Z;
 # Q-2SLS instruments endogenous Z (on the same propensity-reweighted R as
 # LS/LS-QF) with W. Both share exogenous (A,X1,X2). eval/test bridge
 # predictions always plug in the ACTUAL W/Z -- never a first-stage fitted
@@ -960,7 +926,7 @@ def run_2sls_method(
         train_Y = fold_train['Y'].values
 
         # --- H-2SLS: endogenous W instrumented by Z, both stages timed as
-        # ONE block (NEXT_IMPLEMENTATION_PROMPT.md section 5). ---
+        # one block. ---
         h_start = time.monotonic()
         b_hat, used_lstsq_h, h_first_stage_r2 = _solve_2sls(
             train_Y, train_W, train_Z, train_A, train_X[:, 0], train_X[:, 1],
@@ -993,7 +959,7 @@ def run_2sls_method(
         eval_zeros_a = np.zeros(len(eval_idx))
 
         # Predictions always plug in the ACTUAL W/Z, never a first-stage
-        # fitted value (NEXT_IMPLEMENTATION_PROMPT.md sections 1, 2).
+        # fitted value.
         h_observed_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_A, eval_X)
         h0_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_zeros_a, eval_X)
         h1_oof[eval_idx] = _predict_ls_linear(b_hat, eval_W, eval_ones_a, eval_X)
@@ -1044,7 +1010,7 @@ def run_2sls_method(
 def nmmr_method_param_overrides(method: str, n: int) -> Dict[str, Any]:
     """
     Per-method train_params overrides applied on top of the frozen config
-    (实验计划 v2 section 2.1/2.3). n is the repetition's training sample size,
+    n is the repetition's training sample size,
     which sets the clipping levels via output_clip_levels(n). Returns the same
     overrides for H and Q (each network only reads its own clip key).
     """
@@ -1071,7 +1037,7 @@ def run_nmmr_method(
     """
     Fit H and Q (NMMR-U or NMMR-V, picked by which train_params are passed
     in) on the SAME externally-built `fold_plan`, and return the unified
-    prediction set NEXT_IMPLEMENTATION_PROMPT.md section 5 asks for.
+    prediction set.
     """
     from src.models.NMMRh.nmmr_h_experiments import _run_cross_fitting as run_cf_h
     from src.models.NMMRq.nmmr_q_experiments import _run_cross_fitting as run_cf_q
@@ -1111,7 +1077,7 @@ def run_nmmr_method(
 class NonFiniteResultError(RuntimeError):
     """Raised when one of a method's REQUIRED results (OOF/test bridge
     predictions, POR/PIPW/PDR, bridge MSE, held-out moment risk) contains
-    NaN/Inf (Phase 1.1 item 5). Only finiteness is checked here -- never a
+    NaN/Inf. Only finiteness is checked here -- never a
     distance-from-truth threshold, a runtime budget, or whether training
     used every available epoch."""
 
@@ -1148,10 +1114,10 @@ def _make_fold_diag_row(method_id: str, bridge_type: str, fold_id: int, **kwargs
 def compute_clip_diagnostics(method: str, n: int, preds: Dict[str, Any]) -> Dict[str, Any]:
     """
     Share of predictions at or beyond the planned clipping levels
-    output_clip_levels(n) (实验计划 v2 section 2.3), over the OOF and test
+    output_clip_levels(n), over the OOF and test
     predictions of both bridges. For a clipped method this is the fraction of
     clipped predictions; for any other method it is the fraction that WOULD
-    have been clipped, so the plan's "clipping is inactive" premise can be
+    have been clipped, so the premise that clipping is inactive can be
     checked for every method. A relative tolerance of 1e-6 counts values
     sitting exactly on the clip level.
     """
@@ -1185,16 +1151,15 @@ def compute_method_results(
     One (method, variant)'s bridge-error row (E1), effect row (E2),
     per-fold training-diagnostic rows, and the raw OOF/test prediction
     arrays (for the caller to persist as that repetition's prediction
-    payload, plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md section 2 -- this
-    function/the run_*_method functions never write a result file
-    themselves) for one repetition, computed from a single H/Q fit
-    (plan/p0_e1_e2/plan.md section 2: "一次拟合，同时服务 E1 与 E2").
+    payload; this function and the run_*_method functions never write a
+    result file themselves) for one repetition, computed from a single H/Q
+    fit that serves both E1 and E2.
     `h_train_params`/`q_train_params` are only used (and only required) for
     "nmmr_u"/"nmmr_v"; every other method ignores them (no frozen config
     involved at all). `variant` is only meaningful for "ls"/"ls_qf"/"2sls"
     ("oracleP"/"cfP"); every other method ignores it.
 
-    Raises `NonFiniteResultError` (Phase 1.1 item 5) if any required result
+    Raises `NonFiniteResultError` if any required result
     -- OOF/test predictions, POR/PIPW/PDR, bridge MSE, (NMMR only) held-out
     moment risk -- is not finite; the caller records that as a failure
     instead of writing a row. A parametric_proximal fold whose Q solver
@@ -1275,8 +1240,7 @@ def compute_method_results(
     q_diag = compute_q_distribution_diagnostics(np.concatenate([preds["q0_test"], preds["q1_test"]]))
     clip_diag = compute_clip_diagnostics(method, len(train_dataset), preds)
 
-    # Fixed, finite-dimensional independent-test-set moments (plan/p0_e1_e2/
-    # NEXT_IMPLEMENTATION_PROMPT.md section 3) -- diagnostic only, never a
+    # Fixed, finite-dimensional independent-test-set moments: diagnostic only, never a
     # failure gate (no threshold is applied to them below).
     h_moments = compute_h_test_moments(
         y=test_y, a=test_a, z=test_z, x1=test_x[:, 0], x2=test_x[:, 1],
@@ -1355,11 +1319,9 @@ def compute_method_results(
                     propensity_min=d["propensity_min"], propensity_max=d["propensity_max"],
                     first_stage_r2=d["first_stage_r2"],
                 ))
-    # oracle: no fold diagnostics at all (plan asks that it not write fake
-    # best_epoch/stop_reason/training records).
+    # oracle: no fold diagnostics (no fake best_epoch/stop_reason/training records).
 
-    # Exactly the 8 arrays NEXT_IMPLEMENTATION_PROMPT.md section 2 asks to
-    # persist per (scenario,n,repetition,method,variant) -- plain numpy
+    # The 8 arrays persisted per (scenario,n,repetition,method,variant) -- plain numpy
     # arrays from THIS already-completed fit, never retrained to produce
     # them, and never model weights/epoch logs.
     prediction_payload: Dict[str, np.ndarray] = {
@@ -1382,9 +1344,7 @@ def compute_method_results(
 # a brand-new, empty output_dir.
 # ---------------------------------------------------------------------------
 
-# Prediction-persistence path templates (plan/p0_e1_e2/
-# NEXT_IMPLEMENTATION_PROMPT.md section 1-2 / 01_shared_protocol.md section
-# 7) -- recorded into run_config.json verbatim, purely as documentation.
+# Prediction-persistence path templates, recorded into run_config.json as documentation.
 _PREDICTION_INPUTS_PATH_TEMPLATE = "common/prediction_inputs/{scenario}_n{n}_rep{repetition:04d}.npz"
 _PREDICTIONS_PATH_TEMPLATE_NO_VARIANT = "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}.npz"
 _PREDICTIONS_PATH_TEMPLATE_WITH_VARIANT = "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}__{variant}.npz"
@@ -1426,8 +1386,7 @@ def build_run_config(
         "base_seed": base_seed,
         "frozen_config_hashes": dict(sorted(frozen_config_hashes.items())),
         "software_version": _get_git_commit(),
-        # Recomputability record (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md
-        # sections 1-3, 5): every (scenario,n,repetition) saves one common
+        # Recomputability record: every (scenario,n,repetition) saves one common
         # train/test input npz, every successful (scenario,n,repetition,
         # method,variant) saves one OOF/test prediction npz, and the test
         # moments below use these fixed feature orders -- never a tunable
@@ -1443,8 +1402,8 @@ def build_run_config(
     }
     nmmr_in_run = [m for m in methods if m in NMMR_METHODS]
     if nmmr_in_run:
-        # Reproducibility record of the neural-method settings (实验计划 v2
-        # sections 2.1, 2.3, 3.2); the values live in code, not in a CLI flag.
+        # Reproducibility record of the neural-method settings; the values
+        # live in code, not in a CLI flag.
         config["nmmr_settings"] = {
             "checkpoint_criterion": "u_statistic (trainer default; see resolve_checkpoint_criterion)",
             "frozen_config_ids": {m: list(METHOD_FROZEN_IDS[m]) for m in nmmr_in_run},
@@ -1453,10 +1412,7 @@ def build_run_config(
             "nmmr_c_overrides": "diag_weight_rule=corrected (tau = 1/(n_train-1)), loss_name=diag_corrected, plus output clipping",
         }
     if "ls" in methods:
-        # Fixed-ahead-of-time cfP settings (plan/p0_e1_e2/
-        # NEXT_IMPLEMENTATION_PROMPT.md section 1) recorded here purely for
-        # reproducibility -- never tuned on real data, and not exposed as a
-        # CLI flag.
+        # Fixed cfP settings, recorded for reproducibility (not tuned, not a CLI flag).
         config["ls_settings"] = {
             "variants": list(LS_VARIANTS),
             "cfP_solver": "lbfgs",
@@ -1466,8 +1422,7 @@ def build_run_config(
         }
     if "ls_qf" in methods:
         # Same fixed-ahead-of-time cfP settings as "ls", plus the fixed
-        # 14-column quadratic feature order for H/Q (NEXT_IMPLEMENTATION_
-        # PROMPT.md section 4) -- reproducibility only, not a CLI flag.
+        # 14-column quadratic feature order for H/Q -- reproducibility only, not a CLI flag.
         config["ls_qf_settings"] = {
             "variants": list(LS_VARIANTS),
             "h_feature_names": list(LS_QF_H_FEATURE_NAMES),
@@ -1480,8 +1435,7 @@ def build_run_config(
     if "2sls" in methods:
         # Same fixed-ahead-of-time cfP settings as "ls"/"ls_qf", plus the
         # fixed endogenous/instrument/exogenous roles for H/Q
-        # (NEXT_IMPLEMENTATION_PROMPT.md section 5) -- reproducibility
-        # only, not a CLI flag or a tuning knob.
+        # -- reproducibility only, not a CLI flag or a tuning knob.
         config["2sls_settings"] = {
             "variants": list(LS_VARIANTS),
             "h_endogenous": "W", "h_instrument": "Z", "h_exogenous": ["A", "X1", "X2"],
@@ -1542,9 +1496,8 @@ def run_sgd_protocol(
     Run P0/E1/E2's shared SGD protocol for every (scenario, n, repetition,
     method) combination, writing the minimal result structure under
     `output_dir`. One method's failure is recorded in common/failures.csv
-    and does not stop the rest of that repetition or any other repetition
-    (NEXT_IMPLEMENTATION_PROMPT.md 测试与验收 item 9 / 00_p0_correctness.md
-    验收标准 item 9). Requesting a disabled scenario, or a method outside
+    and does not stop the rest of that repetition or any other repetition.
+    Requesting a disabled scenario, or a method outside
     `ALLOWED_METHODS`, fails immediately and loudly instead.
 
     No resume support: `ensure_run_config` requires a brand-new
@@ -1555,12 +1508,12 @@ def run_sgd_protocol(
     unknown_methods = [m for m in methods if m not in ALLOWED_METHODS]
     if unknown_methods:
         raise ValueError(
-            f"This round only supports methods {ALLOWED_METHODS}; got unsupported "
+            f"Supported methods are {ALLOWED_METHODS}; got unsupported "
             f"{unknown_methods}. RKHS is not implemented yet."
         )
     # "ls"/"ls_qf" each always expand into BOTH their pre-defined propensity
     # variants as separate (method, variant) run specs -- never one merged
-    # row, never just one variant (NEXT_IMPLEMENTATION_PROMPT.md section 3).
+    # row, never just one variant.
     # Every other method keeps variant="".
     run_specs: List[Tuple[str, str]] = []
     for method in methods:
@@ -1638,8 +1591,7 @@ def run_sgd_protocol(
                     for r in fold_plan.records
                 ])
 
-                # Common train/test input arrays (plan/p0_e1_e2/
-                # NEXT_IMPLEMENTATION_PROMPT.md section 1) -- saved ONCE per
+                # Common train/test input arrays, saved ONCE per
                 # (scenario,n,repetition), shared by every method's
                 # predictions; only after the fold plan succeeds. Never the
                 # DataFrame object, model weights, U, epoch logs, or
@@ -1691,8 +1643,7 @@ def run_sgd_protocol(
                         for row in fold_diag_rows
                     ])
                     # Persist this already-completed fit's OOF/test
-                    # predictions (plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md
-                    # section 2) -- a failed method above never reaches this
+                    # predictions; a failed method above never reaches this
                     # point, so it never gets a predictions file.
                     predictions_path = _predictions_path(output_dir, scenario_id, n, repetition, method, variant)
                     predictions_path.parent.mkdir(parents=True, exist_ok=True)

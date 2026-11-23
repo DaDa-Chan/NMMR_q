@@ -31,9 +31,8 @@ DIAG_WEIGHT_RULES = ("corrected", "fixed_alpha")
 
 def check_diag_weight_config(train_params: Dict[str, Any]) -> Optional[str]:
     """
-    Validate the optional diagonal-weight configuration of the NMMR losses
-    (实验计划 v2 section 2.1 / batch目标的三个补充命题 Prop. S.2) and return the
-    normalized rule name, or None when the legacy U/V switch is in effect.
+    Validate the optional diagonal-weight configuration of the NMMR losses and
+    return the normalized rule name, or None when the legacy U/V switch is in effect.
 
     Keys:
       diag_weight_rule: None/"none" (legacy: `use_u_statistic` picks U or V),
@@ -70,7 +69,7 @@ def resolve_diag_tau(train_params: Dict[str, Any], n_train: int) -> Optional[flo
     """
     Effective diagonal weight tau of the mini-batch NMMR loss
         L(B) = r_B^T K_off r_B / (b (b-1)) + tau * sum_{i in B} r_i^2 K_ii / b,
-    whose expectation over uniformly drawn batches is R_U + tau * D (Prop. S.2).
+    whose expectation over uniformly drawn batches is R_U + tau * D.
     Returns None when the legacy U/V switch is in effect.
 
     n_train is the number of gradient-training samples of this fold.
@@ -94,7 +93,7 @@ CHECKPOINT_CRITERIA = ("u_statistic", "training_loss")
 def resolve_checkpoint_criterion(train_params: Dict[str, Any]) -> str:
     """
     Validation score used for early stopping, the LR scheduler and best-checkpoint
-    selection (实验计划 v2 section 3.2).
+    selection.
 
       "u_statistic"   (default): the held-out U-statistic moment risk under the
                       candidate's own training kernel, for every training
@@ -116,7 +115,7 @@ def resolve_checkpoint_criterion(train_params: Dict[str, Any]) -> str:
 
 def read_output_clip(train_params, key):
     """
-    Optional output-clipping level from train_params[key] (实验计划 v2 section 2.3).
+    Optional output-clipping level from train_params[key].
     None (or a missing key) disables clipping; otherwise a positive float.
     """
     value = train_params.get(key)
@@ -130,7 +129,7 @@ def read_output_clip(train_params, key):
 
 def output_clip_levels(n: int, q_base: float = 10.0, h_base: float = 20.0, n_ref: int = 500) -> Tuple[float, float]:
     """
-    Output-clipping levels of 实验计划 v2 section 2.3 for sample size n:
+    Output-clipping levels for sample size n:
         B_q = q_base * log(n) / log(n_ref),   B_h = h_base * sqrt(log(n) / log(n_ref)).
     They grow slowly with n (the theory needs B_n -> infinity) and are chosen
     to be inactive on the S1 scenario for n >= n_ref. The caller passes them
@@ -338,7 +337,7 @@ def nested_hpo_fold_split(
     earlystop_val_fraction: float = 0.1,
 ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
-    Three-way nested split for HPO (training_and_hpo_plan.md section 5.3).
+    Three-way nested split for HPO.
 
     For each of `n_splits` outer folds (stratified by A):
       - score_k: the held-out ~1/n_splits of the data. Used ONLY to compute
@@ -368,7 +367,7 @@ def nested_hpo_fold_split(
 
 
 def weighted_fold_mean(scores: List[float], sizes: List[int]) -> float:
-    """Sample-size-weighted mean of per-fold HPO scores (plan eq. 5.3)."""
+    """Sample-size-weighted mean of per-fold HPO scores."""
     scores_arr = np.asarray(scores, dtype=float)
     sizes_arr = np.asarray(sizes, dtype=float)
     return float(np.sum(sizes_arr * scores_arr) / np.sum(sizes_arr))
@@ -377,7 +376,7 @@ def weighted_fold_mean(scores: List[float], sizes: List[int]) -> float:
 def fold_score_dispersion(scores: List[float]) -> Tuple[float, float]:
     """
     Cross-fold standard deviation and standard error of a candidate's
-    per-fold HPO scores (plan section 5.4: "同时保存 fold 间标准差和标准误").
+    per-fold HPO scores.
     """
     scores_arr = np.asarray(scores, dtype=float)
     if len(scores_arr) <= 1:
@@ -393,8 +392,8 @@ def insufficient_treatment_groups_reason(
     min_per_group: int = 1,
 ) -> Optional[str]:
     """
-    Plan section 5.8: "Q 的某个处理组在 batch/fold 中没有足够样本" is one of the
-    pre-specified failure conditions for an HPO trial. Checks every named
+    A treatment group with too few samples in a fold is a pre-specified HPO
+    trial failure. Checks every named
     index set (e.g. {"gradient_train": ..., "earlystop_val": ..., "score": ...})
     for at least `min_per_group` samples of each treatment level; returns a
     human-readable reason for the first violation found, or None if all are OK.
@@ -412,8 +411,7 @@ def insufficient_treatment_groups_reason(
 
 def fold_control_seeds(study_seed: int, fold_idx: int) -> Tuple[int, int]:
     """
-    Round 1 Optuna trials (hpo_selection_plan.md section 6 / pilot HPO fix
-    request item 2): every trial evaluated on the same fold must use the
+    Round 1 Optuna trials: every trial evaluated on the same fold must use the
     SAME model-initialization seed and the SAME DataLoader shuffle seed,
     derived only from (study_seed, fold_idx) -- never trial.number -- so a
     trial's score differs because of its hyperparameters, not because of a
@@ -441,8 +439,7 @@ def build_fold_record(
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    One row of the Round 1 / Round 2 HPO record (pilot HPO fix request item
-    7: "补齐调参记录"). `train_result` is None when the fold failed before
+    One row of the Round 1 / Round 2 HPO record. `train_result` is None when the fold failed before
     training produced any result (e.g. insufficient treatment groups).
     """
     record: Dict[str, Any] = {
@@ -475,8 +472,7 @@ def build_fold_record(
 
 def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Generic one-standard-error selection rule (plan section 5.7 /
-    hpo_selection_plan.md section 8), over a plain list of candidate dicts
+    Generic one-standard-error selection rule over a plain list of candidate dicts
     (not tied to Optuna) each carrying at least: `value`, `fold_se`,
     `network_depth`, `network_width`, `l2_penalty`, `total_train_seconds`.
 
@@ -488,8 +484,7 @@ def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[
          L2 (larger l2_penalty) -> shorter total training time as the final
          tie-break.
 
-    Returns (selected, best): `best` is the pure-minimum candidate, kept for
-    audit per the plan ("同时报告纯最小值规则的选择作为审计信息").
+    Returns (selected, best): `best` is the pure-minimum candidate, kept for audit.
     """
     if not candidates:
         raise RuntimeError("No candidates to select from.")
@@ -514,7 +509,7 @@ def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[
 
 def select_one_se_candidate(study):
     """
-    Apply the one-standard-error candidate selection rule (plan section 5.7)
+    Apply the one-standard-error candidate selection rule
     to a completed Optuna study -- a thin Optuna-specific wrapper around
     `pick_simplest_within_one_se`.
 
@@ -524,7 +519,7 @@ def select_one_se_candidate(study):
     `total_train_seconds`.
 
     Returns (selected_trial, best_trial): `best_trial` is the pure-minimum
-    trial, kept for audit per the plan ("同时报告纯最小值规则的选择作为审计信息").
+    trial, kept for audit.
     """
     import optuna  # local import: only HPO selection needs this, not every caller of this module
 
@@ -543,7 +538,7 @@ def select_one_se_candidate(study):
 
 def finite_valued_trials(study) -> List[Any]:
     """
-    Pilot HPO fix (round 2) item 4: `inf`/`NaN`/non-COMPLETE trials must
+    `inf`/`NaN`/non-COMPLETE trials must
     never participate in ranking -- a trial that returned +inf from a
     pre-specified failure condition is still Optuna-COMPLETE, so filtering
     on state alone is not enough.
@@ -559,11 +554,8 @@ class NoFiniteRound1TrialError(RuntimeError):
     """
     Every Round 1 trial for this study was non-finite (+inf from a
     pre-specified failure condition) or never reached Optuna's COMPLETE
-    state. 精简与config管理.md Phase A item 1/2: this must be raised BEFORE
-    one-SE/top-k selection ever runs -- not after the caller has already
-    printed a "best params"/"selected trial" line that only looks
-    meaningful (score=inf is not meaningful), and must never be mistaken
-    for a Round 2 or unrelated failure.
+    state. Raised before one-SE/top-k selection runs, and distinct from a
+    Round 2 failure.
     """
 
 
@@ -593,10 +585,9 @@ def summarize_trial_failure_reasons(trials) -> Dict[str, int]:
 
 def select_top_k_candidates(study, k: int = 5) -> List[Any]:
     """
-    Plan hpo_selection_plan.md section 6.5: rank Round 1's FINITE-valued
-    completed trials (see finite_valued_trials) by raw mean held-out score
-    (no SE band at this stage -- that only applies to the final selection
-    in section 8) and keep the best `k` to carry into Round 2's multi-seed
+    Rank Round 1's finite-valued completed trials (see finite_valued_trials)
+    by raw mean held-out score (no SE band; that applies only to the final
+    selection) and keep the best `k` to carry into Round 2's multi-seed
     re-evaluation.
     """
     return sorted(finite_valued_trials(study), key=lambda t: t.value)[:k]

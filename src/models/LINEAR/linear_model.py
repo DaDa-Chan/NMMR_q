@@ -81,9 +81,8 @@ class ProximalLinearModel:
         Estimating Equation: E_n { [Y - h(W,A,X;b)] * (1, Z, A, X)^T } = 0
 
         Returns (b_opt, used_lstsq): `used_lstsq` records whether the exact
-        solve was singular and the lstsq fallback was used -- reported as a
-        diagnostic only (plan/p0_e1_e2's Phase "Oracle/参数Proximal" round:
-        "记录是否使用了 lstsq，不要因为条件数较大而自动判失败").
+        solve was singular and the lstsq fallback was used. It is a
+        diagnostic only; a large condition number is not treated as failure.
         """
         A_mat = self.A.reshape(-1, 1)
         M = np.hstack([self.ones, self.Z, A_mat, self.X])

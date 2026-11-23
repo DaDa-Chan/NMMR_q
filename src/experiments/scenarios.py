@@ -1,20 +1,11 @@
 """
-SGD scenario registry (plan/p0_e1_e2/01_shared_protocol.md section 3,
-plan/p0_e1_e2/plan.md section 4, plan/实验计划.md section 6).
+SGD scenario registry.
 
-Only S1 (original W, original Z) is enabled this round. S2-S4 are
-registered as explicit, named placeholders -- `enabled=False` -- so that
-requesting them raises a clear error instead of silently doing nothing or
-falling back to anything else. They must NOT be mapped onto
-src/data/ate/sgd_pv.py's existing, unrelated `scenario=2/3/4` absolute-value
-transforms: those are a different, older numbering and this plan explicitly
-forbids reusing them as S2-S4's real transform
-(plan/p0_e1_e2/plan.md: "不得把旧生成器里同名的 scenario 2-4 自动当作新 E2 场景").
-
-S2-S4's real invertible transforms, true bridges and true ATE are not
-decided yet (plan/实验计划.md section 6: "具体变换形式、真桥与数值规则冻结后
-才能启用") -- enabling them is future work, not something this module
-guesses at.
+Only S1 (original W, original Z) is enabled. S2-S4 are registered as
+placeholders with `enabled=False`, so requesting them raises a clear error.
+They are unrelated to the `scenario=2/3/4` absolute-value transforms in
+src/data/ate/sgd_pv.py, which use an older numbering and must not be reused
+here. Their transforms, true bridges and true ATE are not yet fixed.
 """
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -26,23 +17,22 @@ from scipy.special import expit
 from src.data.ate.sgd_pv import generate_data
 from src.models.hpo_protocol import _true_h0_scenario1, _true_q0_scenario1
 
-# plan/实验计划.md section 4.1: this basic DGP's true ATE is 2 for every
-# contrast (A=1 vs A=0), independent of sample size or seed.
+# The true ATE of the basic DGP is 2, independent of sample size or seed.
 S1_TRUE_ATE = 2.0
 
 
 @dataclass(frozen=True)
 class ScenarioSpec:
     """
-    Minimal, uniform scenario interface (plan/p0_e1_e2/01_shared_protocol.md
-    section 3): `generate_train`/`generate_test` take (n, seed) and return a
-    pandas DataFrame with the SGDDataset columns (X1, X2, A, Z, W, U, Y) --
+    Minimal, uniform scenario interface: `generate_train`/`generate_test`
+    take (n, seed) and return a pandas DataFrame with the SGDDataset
+    columns (X1, X2, A, Z, W, U, Y) --
     wrapping it into an SGDDataset/hashing it is the caller's job, not this
     registry's, so this module stays free of a torch/device dependency.
     `true_h(w, a, x)`/`true_q(z, a, x)` take numpy arrays (any constant `a`
     level broadcastable against `w`/`z`) and return the analytical bridge
-    value. `true_propensity(w, x)` (plan/p0_e1_e2/02_methods.md section 5,
-    the `oracleP` LS variant's propensity) returns the analytical P(A=1|W,X).
+    value. `true_propensity(w, x)` (used by the `oracleP` LS variant)
+    returns the analytical P(A=1|W,X).
     All three are `None` for a disabled scenario.
     """
     scenario_id: str
@@ -74,7 +64,7 @@ def _s1_true_q(z: np.ndarray, a: np.ndarray, x: np.ndarray) -> np.ndarray:
 
 def _s1_true_propensity(w: np.ndarray, x: np.ndarray) -> np.ndarray:
     """pi_0(w,x) = expit(-0.0390625 + 0.125*w - 0.15625*x1 - 0.15625*x2)
-    (plan/p0_e1_e2/02_methods.md section 5: LS's `oracleP` variant)."""
+    (used by the `oracleP` LS variant)."""
     return expit(-0.0390625 + 0.125 * w - 0.15625 * x[:, 0] - 0.15625 * x[:, 1])
 
 
@@ -82,10 +72,8 @@ def _make_disabled_scenario_error(scenario_id: str) -> Callable[..., Any]:
     def _raise(*_args: Any, **_kwargs: Any) -> Any:
         raise NotImplementedError(
             f"Scenario {scenario_id} is registered but not enabled "
-            "(plan/p0_e1_e2/plan.md section 4: its transform/true bridge/true ATE "
-            "have not been frozen yet). This is NOT src/data/ate/sgd_pv.py's old "
-            f"scenario={scenario_id[-1]} generator -- reusing that would silently "
-            "misrepresent an unfrozen scenario as real, which this registry refuses to do."
+            "(its transform, true bridges and true ATE are not fixed yet). It is "
+            f"unrelated to the old scenario={scenario_id[-1]} generator in src/data/ate/sgd_pv.py."
         )
     return _raise
 
@@ -126,7 +114,6 @@ def get_scenario(scenario_id: str) -> ScenarioSpec:
     if not spec.enabled:
         raise ValueError(
             f"Scenario {scenario_id!r} is registered but enabled=False -- "
-            "plan/p0_e1_e2/plan.md section 4 requires freezing its transform/true bridge/"
-            "true ATE before it can be requested."
+            "its transform, true bridges and true ATE must be fixed before it can be requested."
         )
     return spec

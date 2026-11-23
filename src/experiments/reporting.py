@@ -1,8 +1,6 @@
 """
-Read-only summarization of a completed P0/E1/E2 SGD results directory
-(plan/p0_e1_e2/NEXT_IMPLEMENTATION_PROMPT.md "实现 P0/E1/E2 汇总程序",
-plan/p0_e1_e2/05_reporting.md section 3, plan/p0_e1_e2/04_e2_ate_comparison.md
-section 5). This module never trains a model, never runs Monte Carlo, and
+Read-only summarization of a completed P0/E1/E2 SGD results directory.
+This module never trains a model, never runs Monte Carlo, and
 never modifies `run_config.json`, the original per-repetition CSVs, or any
 NPZ prediction file -- it only reads
 
@@ -38,8 +36,7 @@ from .scenarios import get_scenario
 from .sgd_experiment_protocol import LS_VARIANTS, _VARIANT_EXPANDED_METHODS
 
 GROUP_KEYS: Tuple[str, ...] = ("run_stage", "scenario", "n", "method", "variant")
-# Fixed estimator order (NEXT_IMPLEMENTATION_PROMPT.md section 6: "effect
-# summary 再按 POR → PIPW → PDR") -- never alphabetical.
+# Fixed estimator order POR -> PIPW -> PDR, not alphabetical.
 ESTIMATORS: Tuple[str, ...] = ("POR", "PIPW", "PDR")
 _ESTIMATOR_TAU_COLUMNS: Dict[str, str] = {"POR": "tau_por", "PIPW": "tau_pipw", "PDR": "tau_pdr"}
 
@@ -98,8 +95,7 @@ def _planned_method_variants(methods: Sequence[str]) -> List[Tuple[str, str]]:
 
 def _planned_groups(run_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Every (run_stage,scenario,n,method,variant) group this run_config
-    planned to produce, in the stable order NEXT_IMPLEMENTATION_PROMPT.md
-    section 6 asks for: run_stage -> scenario -> n -> method -> variant,
+    planned to produce, in the order run_stage -> scenario -> n -> method -> variant,
     taken straight from run_config.json's own list order (never re-sorted)."""
     run_stage = run_config["run_stage"]
     scenario_ids = run_config["scenarios"]
@@ -179,7 +175,7 @@ _NAN_INTERVAL: Dict[str, float] = {c: float("nan") for c in _INTERVAL_COLUMNS}
 
 def _pdr_interval_summary(group_effect: pd.DataFrame, true_ate: float, sd: float) -> Dict[str, float]:
     """
-    Coverage summary of the per-repetition 95% PDR intervals (实验计划 v2 E4):
+    Coverage summary of the per-repetition 95% PDR intervals (E4):
     coverage of the true ATE, its Monte Carlo SE sqrt(p(1-p)/R), mean interval
     length, mean estimated SE and its ratio to the across-repetition SD.
     NaN when the interval columns are absent (results produced before they

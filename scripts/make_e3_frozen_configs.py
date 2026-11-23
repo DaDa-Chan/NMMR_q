@@ -1,5 +1,5 @@
 """
-Derive the E3 frozen configs (实验计划 v2, E3): the H-V and Q-V frozen configs
+Derive the E3 frozen configs: the H-V and Q-V frozen configs
 with only `batch_size` changed, one subdirectory per batch size.
 
     python scripts/make_e3_frozen_configs.py \

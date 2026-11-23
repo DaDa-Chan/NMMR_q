@@ -1,17 +1,16 @@
 """
-Confirmatory analysis for 实验计划 v2 (E1-E4 on S1).
+Confirmatory analysis for the v2 experiments (E1-E4 on S1).
 
 Reads one or more finished SGD protocol result directories, merges them by
 (scenario, n, repetition, method, variant), and evaluates the pre-registered
-decision rules of 实验计划 v2 section 5. Everything here is read-only: it
+decision rules. Everything here is read-only: it
 never trains a model and never writes into a result directory.
 
 Conventions
 -----------
 * Bias of an estimator in a cell = mean over repetitions of (tau_hat - true_ate);
   its Monte Carlo SE = SD / sqrt(R).
-* Intervals in the decision rules are two-sided 90% intervals (z = 1.645),
-  as written in the plan.
+* Intervals in the decision rules are two-sided 90% intervals (z = 1.645).
 * Different sample sizes use independent data, so differences across n use
   independent-sample SEs. Different methods at the same (n, repetition) share
   the same data (same base_seed), so method comparisons are paired.
@@ -194,7 +193,7 @@ def slope_table(
 
 
 # ---------------------------------------------------------------------------
-# Decisions (实验计划 v2 section 5)
+# Decisions
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -533,14 +532,14 @@ def run_analysis(
         e3_slopes = slope_table(e3, true_ate, "tau", n_boot=n_boot, seed=seed)
         e3_bias.to_csv(out_dir / "e3_bias_table.csv", index=False)
         e3_slopes.to_csv(out_dir / "e3_slopes.csv", index=False)
-        # Slopes in log tau are exploratory only (实验计划 v2 E3): the tau^2 order of Prop. S.3 is an
-        # asymptotic statement that is not reached on this batch-size range.
+        # Slopes in log tau are exploratory only: the tau^2 order of the PDR bias is
+        # asymptotic and is not reached on this batch-size range.
         decisions.append(decide_e3_monotone(e3, true_ate))
         decisions.append(decide_e3_dominance(e3, true_ate, n_boot=n_boot, seed=seed))
 
     payload = [dict(item=d.item, result=d.result, detail=d.detail, rule=d.rule) for d in decisions]
     (out_dir / "decisions.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=float))
-    lines = ["# 确认性分析判定（实验计划 v2 第 5 节）", ""]
+    lines = ["# 确认性分析判定", ""]
     for d in decisions:
         lines.append(f"- **{d.item}**：{d.result}")
         for k, v in d.detail.items():

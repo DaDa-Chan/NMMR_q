@@ -54,9 +54,7 @@ def _get_config_path(project_root, dataset_name, model_type,stat_type):
     return config_path
 
 def run_double_robust_experiment(dataset_name: str, n_trials: int, rhc_mode: str = 'repeated'):
-    """RHC path only (精简与config管理.md 之后新的 P0/E1/E2 SGD 路径见
-    run_sgd_protocol_experiment() below -- SGD 和 RHC 的参数集合、职责差异太大，
-    合并进同一个函数签名只会让两边都变得难读)。"""
+    """仅用于 RHC。SGD 走 run_sgd_protocol_experiment()，两者参数差异太大，不合并。"""
     if dataset_name != 'rhc':
         raise ValueError(
             f"run_double_robust_experiment only serves dataset_name='rhc'; got {dataset_name!r}. "
@@ -91,11 +89,8 @@ def run_sgd_protocol_experiment(
     output_dir: str,
 ):
     """
-    SGD 的 P0/E1/E2 入口 (plan/p0_e1_e2/01_shared_protocol.md section 9):
-    只读取已通过 confirm 的正式 FrozenConfig，不再读取旧
-    `configs/sgd/.../*_fixed.json`，不内联运行 Optuna。实际的场景、分折、
-    NMMR 调度和结果写入全部在 src/experiments/sgd_experiment_protocol.py
-    (本轮唯一的共用 protocol 实现)。
+    SGD 的 P0/E1/E2 入口：只读取已通过 confirm 的 FrozenConfig，不运行 Optuna。
+    场景、分折、方法调度和结果写入都在 src/experiments/sgd_experiment_protocol.py。
 
     不支持断点恢复：`output_dir` 必须是全新的空目录；如果某次运行中断或
     失败，删除该不完整目录后重新运行（见 README "SGD P0/E1/E2 实验运行规则"）。
@@ -289,12 +284,12 @@ if __name__ == "__main__":
         choices=['repeated', 'bootstrap'],
         help="RHC 实验模式: repeated (重复交叉拟合) 或 bootstrap (有放回抽样构造置信区间)"
     )
-    # --- 以下仅用于 --dataset_name sgd (plan/p0_e1_e2/01_shared_protocol.md section 9) ---
+    # --- 以下仅用于 --dataset_name sgd ---
     parser.add_argument('--run_stage', type=str, default='P0', help="P0/E1/E2 (仅 SGD)")
     parser.add_argument('--scenarios', type=str, default='S1', help="逗号分隔的场景 id, 如 'S1' (仅 SGD)")
     parser.add_argument(
         '--methods', type=str, default='nmmr_u,nmmr_v',
-        help=f"逗号分隔的方法, 本轮只支持 {ALLOWED_METHODS} (仅 SGD)"
+        help=f"逗号分隔的方法, 可选 {ALLOWED_METHODS} (仅 SGD)"
     )
     parser.add_argument('--sample_sizes', type=str, default=None, help="逗号分隔的样本量, 如 '500,1000' (仅 SGD)")
     parser.add_argument('--repetitions', type=int, default=None, help="重复数 (仅 SGD)")

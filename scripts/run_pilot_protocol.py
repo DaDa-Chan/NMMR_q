@@ -1,8 +1,5 @@
 """
-End-to-end driver for the HPO pilot protocol (training_and_hpo_plan.md
-sections 5.1, 5.2, 6, the more detailed two-round version in
-hpo_selection_plan.md sections 3-10, and the candidate/frozen-config
-separation in 精简与config管理.md): generate pilot_select/pilot_confirm
+End-to-end driver for the two-round HPO pilot: generate pilot_select/pilot_confirm
 data, run each selected method through the two-round selection (Round 1
 Optuna screening -> Round 2 multi-seed re-evaluation of the finalists ->
 one-SE provisional pick), evaluate that candidate on pilot_confirm, and
@@ -34,7 +31,7 @@ Defaults here are deliberately small (hundreds of samples, a handful of
 trials/epochs, 2 round-2 seeds) so this can be run as a correctness/smoke
 check of the whole pipeline without burning hours of compute. For an
 actual production pilot, override --n_pilot_select/--n_pilot_confirm/
---n_trials/--n_epochs/--round2_init_seeds with the plan's real values
+--n_trials/--n_epochs/--round2_init_seeds with the production values
 (5000/5000/30-50/300/"11,22,33") -- that run will take much longer and
 should be started deliberately, not as a side effect of a quick check.
 
@@ -78,12 +75,11 @@ from src.models.experiment_common import _parse_optuna_space
 
 def _load_method_config(method_id: str):
     """Load this method's real config file under configs/sgd/, the same
-    files production runs would use (already updated to plan 5.6's search
-    space).
+    files production runs use.
     Returns (data_configs, train_params, raw_bytes) -- `raw_bytes` is the
     file's exact, unmodified bytes (parsed via `json.loads`, never
     round-tripped through `json.dump`), saved verbatim as this run's search
-    config snapshot (精简与config管理.md section 4.2) via
+    config snapshot via
     hp.ensure_search_config_snapshot, before any CLI override
     (--n_epochs/--n_splits/--patience) is applied to `train_params`."""
     model_kind, stat_kind = method_id.split("-")
@@ -195,23 +191,16 @@ def main():
           f"for {method_ids} ===")
 
     pipeline_results = {}
-    # 精简与config管理.md Phase A item 2: Round 1 and Round 2 total failure
-    # are DISTINCT, named exception types -- never both reported as the same
-    # generic "Round 1 failed". Any OTHER exception is not caught here at
-    # all: it propagates with its own type and message instead of being
-    # relabeled as a Round 1 failure.
+    # Round 1 and Round 2 total failures are distinct exception types; any
+    # other exception propagates unchanged.
     round1_failed_methods = []
     round2_failed_methods = []
     for method_id in method_ids:
         data_configs, train_params, raw_cfg_bytes = _load_method_config(method_id)
 
-        # 精简与config管理.md section 4.2: a human-readable, byte-exact copy
-        # of the search config this method used THIS run. Write-once: reused
-        # as-is if it already matches (an ordinary resume), but if this
-        # results_dir's snapshot was taken from a DIFFERENT config, this
-        # raises immediately -- no HPO runs for this method, and the old
-        # snapshot is left completely untouched. Use a new --results_dir for
-        # a genuinely changed search space instead of reusing this one.
+        # Byte-exact, write-once snapshot of this run's search config. A
+        # matching snapshot is reused (resume); a different one raises before
+        # any HPO runs. Use a new --results_dir for a changed search space.
         snapshot_path = hp.search_config_snapshot_path(
             results_dir, method_id=method_id if len(method_ids) > 1 else None,
         )

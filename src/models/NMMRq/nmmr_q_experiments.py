@@ -67,7 +67,7 @@ def _compute_unified_q_scores(trainer,
                               dataset,
                               indices: List[int]) -> Tuple[float, float, int]:
     """
-    Unified HPO scoring metric for Q (plan section 5.4): regardless of
+    Unified HPO scoring metric for Q : regardless of
     whether this candidate trained with the U- or V-statistic objective,
     candidates are always compared on the V-statistic moment risk
         S_Q(lambda) = 0.5 * sum_{a in {0,1}} (1/n^2) rho_a^T K rho_a,
@@ -80,7 +80,7 @@ def _compute_unified_q_scores(trainer,
 
     Returns (score_v, score_u, n). score_v is the ranking metric above;
     score_u is the same quantity with the U-statistic (diagonal removed),
-    recorded alongside it (实验计划 v2 section 3.3) but not used for ranking.
+    recorded alongside it but not used for ranking.
     """
     view = _build_dataset_view(dataset, indices)
     scorer = NMMR_Q_Loss(use_u_statistic=False)
@@ -118,9 +118,8 @@ def _q_predictions_by_treatment(trainer, model, dataset, indices) -> Dict[int, n
     """
     Raw q predictions on `indices`, split by the treatment level each
     sample actually received (q0(Z,X) for A=0 rows, q1(Z,X) for A=1 rows).
-    Used for both the hard-threshold failure check (pilot HPO fix request
-    item 3) and the Round 1/Round 2 record's per-treatment-group
-    distribution stats (item 7) -- one forward pass serves both.
+    Used for both the hard-threshold failure check and the Round 1/Round 2
+    record's per-treatment-group distribution stats; one forward pass serves both.
     """
     view = _build_dataset_view(dataset, indices)
     with torch.no_grad():
@@ -135,8 +134,8 @@ def _q_predictions_by_treatment(trainer, model, dataset, indices) -> Dict[int, n
 
 
 def _q_distribution_stats(q_by_treatment: Dict[int, np.ndarray]) -> Dict[str, float]:
-    """Per-treatment-group Q distribution diagnostics (pilot HPO fix request
-    item 7): mean/SD/min/max, P50/P90/P95/P99, and q>10/50/100 proportions."""
+    """Per-treatment-group Q distribution diagnostics: mean/SD/min/max,
+    P50/P90/P95/P99, and q>10/50/100 proportions."""
     stats: Dict[str, float] = {}
     for level, q_level in q_by_treatment.items():
         if q_level.size == 0:
@@ -178,13 +177,13 @@ def _run_optuna_tuning(
     Returns `final_best_params` (dict) by default. If `return_study=True`,
     returns `(final_best_params, study, selected_trial, best_trial)` instead,
     so a caller (e.g. hpo_protocol.py) can archive the full trial table and
-    the one-SE vs pure-minimum provenance (plan section 6.2).
+    the one-SE vs pure-minimum provenance.
 
     `storage`/`study_name`: when given (e.g. "sqlite:///tune_results/
     optuna_studies/q_u_round1.db"), the Optuna study is persisted there
     (`load_if_exists=True`) instead of living only in memory, so a run
     interrupted partway through can resume and add trials rather than
-    starting over (pilot HPO fix request item 7).
+    starting over.
 
     `existing_trial_count`: how many trials the persisted study already
     has BEFORE this call (0 for a brand-new study). A resumed run must NOT
@@ -192,8 +191,7 @@ def _run_optuna_tuning(
     sampler itself is never persisted, only the trials are, so a freshly
     constructed `TPESampler(seed=tuning_seed)` would otherwise replay the
     EXACT SAME "random startup" draws every time, silently re-suggesting
-    the whole first batch of hyperparameters again on every resume
-    (精简与config管理.md Phase A follow-up: "恢复运行可能重复抽到相同参数").
+    the whole first batch of hyperparameters again on every resume.
     When `existing_trial_count > 0`, the sampler seed is deterministically
     re-derived from (tuning_seed, existing_trial_count) instead, so a
     resumed batch is not forced to replay the first batch wholesale. This
@@ -219,11 +217,10 @@ def _run_optuna_tuning(
             current_params[param_name] = _suggest_from_trial(
                 trial, param_name, config
             )
-        # Plan 2.8d fix: read batch_size from THIS trial's params, not the
-        # fixed base config -- otherwise searching over batch_size has no effect.
+        # Read batch_size from this trial's params, not the base config.
         batch_size = current_params["batch_size"]
 
-        # Record the fields the one-SE selection rule (plan 5.7) needs to rank
+        # Record the fields the one-SE selection rule needs to rank
         # candidates by simplicity, regardless of whether they were searched
         # or came from the fixed base config.
         trial.set_user_attr("network_depth", current_params.get("network_depth"))
@@ -244,7 +241,7 @@ def _run_optuna_tuning(
             trial.set_user_attr("fold_records", fold_records)
             return float("inf")
 
-        # Nested three-way split per outer fold (plan section 5.3):
+        # Nested three-way split per outer fold:
         # gradient_train_idx/earlystop_val_idx drive this candidate's training
         # and early stopping; score_idx is held out from both and only used
         # for the final unified score below, so the same data never both
@@ -252,7 +249,7 @@ def _run_optuna_tuning(
         for fold_idx, (gradient_train_idx, earlystop_val_idx, score_idx) in enumerate(
             nested_hpo_fold_split(dataset, n_splits, random_seed), start=1
         ):
-            # Plan 5.8: a treatment group with too few samples in any of the
+            # A treatment group with too few samples in any of the
             # three splits is a pre-specified failure condition for this trial.
             insufficient_reason = insufficient_treatment_groups_reason(
                 dataset,
@@ -265,7 +262,7 @@ def _run_optuna_tuning(
             if insufficient_reason is not None:
                 return fail(fold_idx, insufficient_reason)
 
-            # Pilot HPO fix request item 2: every trial evaluated on this fold
+            # Every trial evaluated on this fold
             # shares the same model-init seed and the same DataLoader shuffle
             # seed, derived only from (random_seed, fold_idx) -- NOT
             # trial.number -- so a trial's score differs because of its
@@ -294,21 +291,21 @@ def _run_optuna_tuning(
 
             try:
                 model, train_result = trainer.train(train_loader, earlystop_loader)
-                # Plan 5.8: a fold that never got a valid checkpoint is a failure.
+                # A fold that never got a valid checkpoint is a failure.
                 if train_result.stop_reason == "no_valid_checkpoint":
                     return fail(fold_idx, "no_valid_checkpoint", fold_init_seed, fold_shuffle_seed, train_result)
-                # Pilot HPO fix request item 3: NaN/Inf seen during training
+                # NaN/Inf seen during training
                 # itself (not just the final score) is a failure.
                 if train_result.n_nonfinite_train > 0 or train_result.n_nonfinite_val > 0:
                     return fail(fold_idx, "nonfinite_during_training", fold_init_seed, fold_shuffle_seed, train_result)
 
                 q_by_treatment = _q_predictions_by_treatment(trainer, model, dataset, score_idx.tolist())
 
-                # Unified V-statistic score (plan 5.4), on the untouched score fold.
+                # Unified V-statistic score on the untouched score fold.
                 fold_score, fold_score_u, fold_n = _compute_unified_q_scores(
                     trainer, model, dataset, score_idx.tolist()
                 )
-                # Plan 5.8: NaN/Inf score is a failure, not a value to average in.
+                # A NaN/Inf score is a failure, not a value to average in.
                 if not math.isfinite(fold_score):
                     return fail(fold_idx, "nonfinite_score", fold_init_seed, fold_shuffle_seed, train_result)
 
@@ -362,9 +359,8 @@ def _run_optuna_tuning(
     study.optimize(objective, n_trials=n_trials)
 
     print(f"\n[Optuna] 调优完成。")
-    # 精简与config管理.md Phase A item 1/2: 在选择最佳 trial 之前先检查是否
-    # 存在任何有限值 trial -- 否则下面的 one-SE 选择会在一个 value=inf 的
-    # trial 上"成功"跑完,打印出看起来正常但毫无意义的"最佳参数"。
+    # Without any finite-valued trial, one-SE selection would "succeed" on
+    # value=inf trials and report meaningless best parameters.
     if not finite_valued_trials(study):
         reason_counts = summarize_trial_failure_reasons(study.trials)
         print(f"[Optuna] Round 1: 全部 {len(study.trials)} 个 trial 失败"
@@ -375,7 +371,7 @@ def _run_optuna_tuning(
             f"Round 1 produced no finite-valued trial out of {len(study.trials)} total."
         )
 
-    # Plan 5.7: the one-SE rule, not the pure minimum, is the primary selection
+    # The one-SE rule, not the pure minimum, is the primary selection
     # rule; the pure-minimum trial is kept only as audit info alongside it.
     selected_trial, best_trial = select_one_se_candidate(study)
     print(f"  纯最小值 Trial(仅作审计): {best_trial.number}, "
@@ -451,25 +447,23 @@ def _run_cross_fitting(data_name:str,
     Returns a 4th value `fold_diagnostics`: one dict per fold with
     `best_epoch`/`stopped_early`/`stop_reason`/`train_seconds` (from that
     fold's TrainResult) plus `moment_risk`/`n_eval` -- the unified
-    V-statistic held-out moment risk (same scorer HPO uses, see plan 5.4),
+    V-statistic held-out moment risk (the same scorer HPO uses),
     evaluated on this fold's held-out eval split using the kernel bandwidth
-    already frozen from this fold's own gradient-training subset. This is
-    what plan 6.1/hpo_selection_plan.md section 9's pilot-confirm diagnostics
-    ("矩风险"、"所有折都恢复了最佳模型"、"训练时间") read from.
+    already frozen from this fold's own gradient-training subset. The
+    pilot-confirm diagnostics read these fields.
 
-    Three optional, purely additive parameters (plan/p0_e1_e2/01_shared_protocol.md
-    section 5), all backward-compatible no-ops when omitted:
+    Three optional parameters, all backward-compatible no-ops when omitted:
 
     - `fold_plan`: an explicit list of (train_idx, eval_idx) pairs. When
       given, it is used AS-IS -- this function never re-splits internally,
       so an externally built, A-stratified, H/Q-shared fold plan is
-      respected exactly (精简与config管理.md 同类精神: 不静默回退).
+      respected exactly.
     - `init_seed`: the base seed each fold's model initialization derives
       from. When omitted (every existing caller), behavior is byte-for-byte
       unchanged -- `random_seed` is still used, exactly as before. When
       given, model initialization no longer depends on `random_seed` (which
-      in every caller is really the fold-SPLIT seed), fixing the
-      split/init-seed conflation plan/p0_e1_e2/00_p0_correctness.md flags.
+      in every caller is really the fold-SPLIT seed), so split and
+      initialization seeds are not conflated.
     - `test_dataset`: an independent dataset predicted by each fold's model
       right before it's released. The 5th return value is `None` when this
       is omitted, or `{"q0_test": ..., "q1_test": ...}` -- the equal-weight
@@ -566,7 +560,7 @@ def _run_cross_fitting(data_name:str,
             "stopped_early": fold_train_result.stopped_early,
             "stop_reason": fold_train_result.stop_reason,
             # Direct signal pilot-confirm's all_folds_restored_best_checkpoint
-            # check relies on (精简与config管理.md Phase C follow-up) -- not
+            # check relies on -- not
             # inferred from stop_reason, which stays only as a diagnostic.
             "best_state_restored": fold_train_result.best_state_restored,
             "train_seconds": fold_train_result.train_seconds,
@@ -583,8 +577,7 @@ def _run_cross_fitting(data_name:str,
 
     test_predictions = None
     if test_dataset is not None:
-        # Equal-weight average across folds (plan/p0_e1_e2/01_shared_protocol.md
-        # section 5: "由于每个模型训练样本数相同，等权规则预先固定").
+        # Equal-weight average across folds (every fold model has the same training size).
         test_predictions = {
             "q0_test": np.mean(np.stack(test_q0_per_fold, axis=0), axis=0).reshape(-1),
             "q1_test": np.mean(np.stack(test_q1_per_fold, axis=0), axis=0).reshape(-1),
@@ -686,7 +679,7 @@ def NMMR_Q_experiment(dataset_name: str,
     n_splits = int(base_params.get('n_splits', 5))
 
     # NMMR_Q_experiment is the formal/fixed-parameter entrypoint: it no
-    # longer launches Optuna inline (pilot HPO fix request item 8).
+    # does not launch Optuna.
     # Hyperparameter search happens exclusively in
     # scripts/run_pilot_protocol.py (which calls _run_optuna_tuning
     # directly, not through this function) and ends in a frozen config.
@@ -849,8 +842,7 @@ def train_q_standalone(data_configs, train_params, dataset_name, scenario, save_
                         data_seed=None, init_seed=None, save_model=False):
     """
     Standalone (non-cross-fitting) training path, kept as a horizontal
-    comparison point against cross-fitting (精简与config管理.md section
-    6.6 / Phase D). Only reads an already-frozen `train_params` (no search
+    comparison point against cross-fitting. Only reads an already-frozen `train_params` (no search
     space -- Optuna runs exclusively in scripts/run_pilot_protocol.py now,
     this function never launches it), trains ONE model on a single
     train/test split with those same frozen parameters, and reports a
@@ -875,8 +867,7 @@ def train_q_standalone(data_configs, train_params, dataset_name, scenario, save_
         dataset = SGDDataset(csv_path='', df=df, device=device)
 
     elif dataset_key == 'rhc':
-        # Phase D explicit scope limit (精简与config管理.md section 6.6), not an
-        # oversight: _run_cross_fitting's RHC population is the merged
+        # Deliberate scope limit: _run_cross_fitting's RHC population is the merged
         # train+val+test set (see NMMR_Q_experiment's 'rhc' branch), while a
         # single RHCDataset(split='train') here would be a smaller, different
         # population -- not a valid horizontal comparison against

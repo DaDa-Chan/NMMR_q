@@ -1,9 +1,6 @@
 """
-Pure, Dataset/Torch-free effect and bridge-error functions
-(plan/p0_e1_e2/01_shared_protocol.md section 6, plan/实验计划.md section 2
-and 12.2). These take plain numpy arrays only, so they can be unit-tested
-against hand-computed examples without touching any model or dataset code,
-and reused identically by P0/E1/E2.
+Effect and bridge-error functions on plain numpy arrays (no Dataset or
+torch), shared by P0/E1/E2 and unit-testable against hand-computed examples.
 """
 from statistics import NormalDist
 from typing import Any, Dict
@@ -14,8 +11,7 @@ import numpy as np
 def compute_influence_ci(scores: np.ndarray, level: float = 0.95) -> Dict[str, float]:
     """
     Cross-fitted influence-function variance and Wald interval for an effect
-    estimate that is the mean of per-sample scores (余项速率的原始条件.md,
-    Lemma P.7):
+    estimate that is the mean of per-sample scores:
         tau_hat = mean(phi_i),  V_hat = mean((phi_i - tau_hat)^2),
         se = sqrt(V_hat / n),   CI = tau_hat -/+ z_{1-(1-level)/2} * se.
     Each phi_i must be the score of sample i under bridges fitted WITHOUT
@@ -47,14 +43,13 @@ def compute_effect_scores(
     h0: np.ndarray,
 ) -> Dict[str, Any]:
     """
-    Per-sample POR/PIPW/PDR scores (plan/实验计划.md section 2) plus their
+    Per-sample POR/PIPW/PDR scores plus their
     sample means. `q_observed`/`h_observed` are each sample's OOF bridge
     prediction at its OWN observed treatment level; `h1`/`h0` are the same
     sample's OOF outcome-bridge prediction forced to A=1/A=0 respectively.
 
-    The final effect estimate is the mean of ALL samples' scores -- never a
-    simple average of per-fold estimates (plan/实验计划.md section 3.3: "最终
-    效应按所有样本的 score 加权平均；折大小不等时不能简单等权平均各折效应").
+    The effect estimate is the mean of ALL samples' scores, not an equal-weight
+    average of per-fold estimates (folds may differ in size).
     """
     y = np.asarray(y, dtype=float).reshape(-1)
     a = np.asarray(a, dtype=float).reshape(-1)
@@ -63,7 +58,7 @@ def compute_effect_scores(
     h1 = np.asarray(h1, dtype=float).reshape(-1)
     h0 = np.asarray(h0, dtype=float).reshape(-1)
 
-    # Minimal input checks (Phase 1.1 item 6) -- not a general validation
+    # Minimal input checks -- not a general validation
     # framework, just the three things that would otherwise silently
     # produce a meaningless or misleading score for this SGD protocol.
     lengths = {
@@ -93,7 +88,7 @@ def compute_effect_scores(
         "tau_pipw": float(np.mean(pipw_scores)),
         "tau_pdr": float(np.mean(pdr_scores)),
     }
-    # 95% influence-function interval for PDR only (实验计划 v2 section 3.4):
+    # 95% influence-function interval for PDR only:
     # POR/PIPW have no matching sqrt(n) theory here and are compared as point
     # estimates. Needs n >= 2; with n == 1 the interval fields are NaN.
     if n >= 2:
@@ -107,7 +102,7 @@ def compute_effect_scores(
 
 
 def compute_bridge_mse(pred: np.ndarray, true: np.ndarray) -> float:
-    """MSE_{H,a}/MSE_{Q,a} (plan/实验计划.md section 12.2): mean squared
+    """MSE_{H,a}/MSE_{Q,a}: mean squared
     error between a bridge's prediction and its analytical true value, both
     evaluated at the SAME forced treatment level, on an independent test set."""
     pred = np.asarray(pred, dtype=float).reshape(-1)
@@ -130,8 +125,7 @@ def compute_h_test_moments(
     h0: np.ndarray, h1: np.ndarray,
 ) -> Dict[str, float]:
     """
-    Fixed, finite-dimensional H test moment (plan/p0_e1_e2/
-    NEXT_IMPLEMENTATION_PROMPT.md section 3): on the independent test set,
+    Fixed, finite-dimensional H test moment on the independent test set:
     `h_hat_A = A*h1 + (1-A)*h0` (the H bridge evaluated at each sample's
     OWN observed treatment), `r_H = Y - h_hat_A`, `g_H = (1,Z,A,X1,X2)`
     (`H_MOMENT_FEATURE_NAMES`), `m_H = mean(r_H * g_H)` (elementwise over
@@ -160,8 +154,7 @@ def compute_q_test_moments(
     a: np.ndarray, w: np.ndarray, x1: np.ndarray, x2: np.ndarray, q0: np.ndarray, q1: np.ndarray,
 ) -> Dict[str, float]:
     """
-    Fixed, finite-dimensional Q test moment (plan/p0_e1_e2/
-    NEXT_IMPLEMENTATION_PROMPT.md section 3): for each forced treatment
+    Fixed, finite-dimensional Q test moment: for each forced treatment
     level `a_level` in {0,1}, `r_{Q,a} = I(A==a_level)*q_a - 1`, `g_Q =
     (1,W,X1,X2)` (`Q_MOMENT_FEATURE_NAMES`), `m_{Q,a} = mean(r_{Q,a}*g_Q)`
     (a 4-vector each); `m_Q` concatenates `m_{Q,0}` then `m_{Q,1}` into one
@@ -188,10 +181,9 @@ def compute_q_test_moments(
 
 
 def compute_q_distribution_diagnostics(q_values: np.ndarray) -> Dict[str, float]:
-    """Minimal Q diagnostics (plan/p0_e1_e2/05_reporting.md section 1):
-    min/p50/p90/p95/p99/max and the fraction of non-positive predictions.
-    Reported for context only -- a negative or extreme Q is never itself
-    treated as a failure (plan/p0_e1_e2/05_reporting.md section 2)."""
+    """Minimal Q diagnostics: min/p50/p90/p95/p99/max and the fraction of
+    non-positive predictions. Context only; a negative or extreme Q is never
+    treated as a failure."""
     q_values = np.asarray(q_values, dtype=float).reshape(-1)
     if q_values.size == 0:
         return {
