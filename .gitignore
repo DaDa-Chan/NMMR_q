@@ -50,3 +50,6 @@ predicts/
 
 # Server pilot diagnostic outputs (not for GitHub)
 pilot_out/
+
+# Paper draft (not public until co-author approval)
+paper/
