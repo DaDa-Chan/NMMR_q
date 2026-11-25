@@ -39,14 +39,15 @@ def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_n
     """
     根据配置创建对应的 H Trainer
     """
-    if data_name == 'sgd':
+    # The trainer is data-agnostic; 'rhc' reuses it on the real-data frame.
+    if data_name in ('sgd', 'rhc'):
         return NMMR_H_Trainer_SGD(
             data_configs=data_configs,
             train_params=train_params,
             random_seed=random_seed,
             dump_folder=dump_folder,
         )
-    raise ValueError(f"Unknown data_name: {data_name!r} (only 'sgd' is supported).")
+    raise ValueError(f"Unknown data_name: {data_name!r} (expected 'sgd' or 'rhc').")
 
 
 def _compute_unified_h_score(trainer, model: torch.nn.Module, dataset, indices: List[int]) -> Tuple[float, int]:

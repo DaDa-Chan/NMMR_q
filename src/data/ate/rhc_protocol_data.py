@@ -31,6 +31,8 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import Dataset
 
 RHC_RAW_PATH = (
     Path(__file__).resolve().parents[3] / "data" / "right_heart_catheterization" / "rhc_raw.csv"
@@ -187,3 +189,53 @@ def apply_rhc_transform(df: pd.DataFrame, transform: RhcTransform) -> pd.DataFra
             values = np.log(values)
         out[col] = (values - mean) / transform.stds[col]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tensor dataset for the NMMR trainers
+# ---------------------------------------------------------------------------
+
+class RHCFrameDataset(Dataset):
+    """
+    Torch dataset over an (already transformed) RHC analysis frame, with the
+    attribute layout the NMMR trainers and cross-fitting helpers read:
+    ``A``, ``Y`` of shape (n, 1), ``Z``, ``W``, ``X`` of shape (n, d), and
+    ``data`` (the frame itself, for the parametric baseline). There is no
+    latent ``U`` in real data; ``U`` is a zero column so batches have the
+    same keys as the simulation datasets.
+    """
+
+    def __init__(self, df: pd.DataFrame, device: str | torch.device = "cpu",
+                 dtype: torch.dtype = torch.float32,
+                 z_cols: Sequence[str] = tuple(Z_COLUMNS), w_cols: Sequence[str] = tuple(W_COLUMNS),
+                 x_cols: Sequence[str] = tuple(X_COLUMNS)):
+        self.data = df.reset_index(drop=True)
+        self.z_cols, self.w_cols, self.x_cols = list(z_cols), list(w_cols), list(x_cols)
+
+        def tensor(values: np.ndarray) -> torch.Tensor:
+            return torch.tensor(np.asarray(values, dtype=float), dtype=dtype, device=device)
+
+        self.A = tensor(self.data[A_COLUMN].to_numpy()).reshape(-1, 1)
+        self.Y = tensor(self.data[Y_COLUMN].to_numpy()).reshape(-1, 1)
+        self.Z = tensor(self.data[self.z_cols].to_numpy())
+        self.W = tensor(self.data[self.w_cols].to_numpy())
+        self.X = tensor(self.data[self.x_cols].to_numpy())
+        self.U = torch.zeros_like(self.A)
+
+    def __len__(self) -> int:
+        return self.A.shape[0]
+
+    def __getitem__(self, idx):
+        return {"X": self.X[idx], "A": self.A[idx], "Z": self.Z[idx], "W": self.W[idx],
+                "U": self.U[idx], "Y": self.Y[idx]}
+
+
+def transformed_dataset(frame: pd.DataFrame, fit_rows: Sequence[int],
+                        device: str | torch.device = "cpu") -> RHCFrameDataset:
+    """
+    Fit the transform on ``frame.iloc[fit_rows]`` only and return a dataset
+    over the WHOLE frame (same row order) with that transform applied. Rows
+    outside ``fit_rows`` never influence the transform.
+    """
+    transform = fit_rhc_transform(frame.iloc[list(fit_rows)])
+    return RHCFrameDataset(apply_rhc_transform(frame, transform), device=device)

@@ -1,0 +1,167 @@
+{
+  "generator": "scipy.stats.qmc.LatinHypercube",
+  "pool_size": 20,
+  "pool_seed": 20261125,
+  "search_space": {
+    "network_depth": [
+      2,
+      3,
+      4
+    ],
+    "network_width": [
+      32,
+      64,
+      128
+    ],
+    "learning_rate_log_uniform": [
+      0.0001,
+      0.005
+    ],
+    "l2_penalty_log_uniform": [
+      1e-07,
+      0.001
+    ]
+  },
+  "candidates": [
+    {
+      "candidate_id": 0,
+      "network_depth": 3,
+      "network_width": 64,
+      "learning_rate": 0.001455419928820483,
+      "l2_penalty": 1.8317468583283734e-05
+    },
+    {
+      "candidate_id": 1,
+      "network_depth": 4,
+      "network_width": 32,
+      "learning_rate": 0.0025213481895457173,
+      "l2_penalty": 6.965351439859656e-05
+    },
+    {
+      "candidate_id": 2,
+      "network_depth": 2,
+      "network_width": 32,
+      "learning_rate": 0.00047576319068913183,
+      "l2_penalty": 0.00017442945503661088
+    },
+    {
+      "candidate_id": 3,
+      "network_depth": 2,
+      "network_width": 32,
+      "learning_rate": 0.0007706495928028986,
+      "l2_penalty": 6.284413433070592e-05
+    },
+    {
+      "candidate_id": 4,
+      "network_depth": 3,
+      "network_width": 128,
+      "learning_rate": 0.00038965444124377396,
+      "l2_penalty": 5.416769054836782e-07
+    },
+    {
+      "candidate_id": 5,
+      "network_depth": 2,
+      "network_width": 64,
+      "learning_rate": 0.00316784050180226,
+      "l2_penalty": 2.0409605025535717e-06
+    },
+    {
+      "candidate_id": 6,
+      "network_depth": 2,
+      "network_width": 128,
+      "learning_rate": 0.00011313782003824054,
+      "l2_penalty": 2.7375990999225985e-06
+    },
+    {
+      "candidate_id": 7,
+      "network_depth": 3,
+      "network_width": 64,
+      "learning_rate": 0.004554169977659867,
+      "l2_penalty": 2.415781638358581e-07
+    },
+    {
+      "candidate_id": 8,
+      "network_depth": 4,
+      "network_width": 128,
+      "learning_rate": 0.0021465839834532217,
+      "l2_penalty": 5.088262542714987e-06
+    },
+    {
+      "candidate_id": 9,
+      "network_depth": 4,
+      "network_width": 64,
+      "learning_rate": 0.00013178793643977947,
+      "l2_penalty": 6.820356434527223e-07
+    },
+    {
+      "candidate_id": 10,
+      "network_depth": 2,
+      "network_width": 64,
+      "learning_rate": 0.00017185683750832502,
+      "l2_penalty": 0.000708992824969801
+    },
+    {
+      "candidate_id": 11,
+      "network_depth": 4,
+      "network_width": 128,
+      "learning_rate": 0.00380342029321028,
+      "l2_penalty": 0.0002692447657902639
+    },
+    {
+      "candidate_id": 12,
+      "network_depth": 2,
+      "network_width": 64,
+      "learning_rate": 0.0012117758819532925,
+      "l2_penalty": 1.200513063564898e-06
+    },
+    {
+      "candidate_id": 13,
+      "network_depth": 3,
+      "network_width": 128,
+      "learning_rate": 0.0009326784721539396,
+      "l2_penalty": 0.0005215701722777172
+    },
+    {
+      "candidate_id": 14,
+      "network_depth": 3,
+      "network_width": 128,
+      "learning_rate": 0.0004990948071335967,
+      "l2_penalty": 1.418510627916331e-07
+    },
+    {
+      "candidate_id": 15,
+      "network_depth": 4,
+      "network_width": 32,
+      "learning_rate": 0.001631307940571039,
+      "l2_penalty": 3.0312700248237353e-07
+    },
+    {
+      "candidate_id": 16,
+      "network_depth": 4,
+      "network_width": 32,
+      "learning_rate": 0.0002480630337707792,
+      "l2_penalty": 2.688358263029139e-05
+    },
+    {
+      "candidate_id": 17,
+      "network_depth": 4,
+      "network_width": 128,
+      "learning_rate": 0.00029478722503583905,
+      "l2_penalty": 7.36732035348952e-06
+    },
+    {
+      "candidate_id": 18,
+      "network_depth": 3,
+      "network_width": 32,
+      "learning_rate": 0.0006199759008891591,
+      "l2_penalty": 1.2725453532650272e-05
+    },
+    {
+      "candidate_id": 19,
+      "network_depth": 3,
+      "network_width": 64,
+      "learning_rate": 0.00018276400386115722,
+      "l2_penalty": 0.00011250035836560077
+    }
+  ]
+}
