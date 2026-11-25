@@ -25,7 +25,7 @@ NMMR_q/
 │   ├── data/ate/                 #   数据生成与加载
 │   │   ├── sgd_pv.py             #     合成数据生成（真实 ATE = 2.0）
 │   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
-│   │   └── rhc_preprocess.py     #     RHC 数据预处理
+│   │   └── rhc_protocol_data.py  #     RHC 分析数据（由 rhc_raw.csv 构造）
 │   └── utils.py                  #   工具函数
 ├── scripts/                      # HPO 与专项实验脚本
 │   ├── run_pilot_protocol.py     #   SGD HPO 主入口
@@ -91,10 +91,13 @@ python src/data/ate/sgd_pv.py
 
 ### RHC 真实数据
 
-将以下文件放入 `data/right_heart_catheterization/`：
+将原始数据 `rhc_raw.csv` 放入 `data/right_heart_catheterization/`。`src/data/ate/rhc_protocol_data.py` 由它构造分析数据（$A$、$Y$、$Z$、$W$ 与 67 个协变量），按折标准化见其中的 `fit_rhc_transform` / `apply_rhc_transform`。核对预处理：
 
-- `rhc_train.csv`、`rhc_val.csv`、`rhc_test.csv`
-- `RHC_X_allfeatures_list.csv`、`RHC_X_significantfeatures_list.csv`
+```bash
+python scripts/rhc_check_preprocessing.py
+```
+
+旧的离线切分文件（`rhc_train/val/test.csv` 等）已删除，依赖它们的旧 RHC 入口不再可用。
 
 ## 实验工作流
 

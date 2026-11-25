@@ -24,7 +24,7 @@ NMMR_q/
 │   ├── data/ate/                 #   Data generation and loading
 │   │   ├── sgd_pv.py             #     Synthetic data generation (true ATE = 2.0)
 │   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
-│   │   └── rhc_preprocess.py     #     RHC data preprocessing
+│   │   └── rhc_protocol_data.py  #     RHC analysis frame (built from rhc_raw.csv)
 │   └── utils.py                  #   Utility functions
 ├── scripts/                      # HPO and focused experiment scripts
 │   ├── run_pilot_protocol.py     #   SGD pilot HPO entry point
@@ -78,10 +78,13 @@ Supports 4 scenarios controlling proxy variable nonlinearity. True ATE = 2.0.
 
 ### Right Heart Catheterization (RHC)
 
-Place the following files in `data/right_heart_catheterization/`:
+Place the raw data `rhc_raw.csv` in `data/right_heart_catheterization/`. `src/data/ate/rhc_protocol_data.py` builds the analysis frame from it ($A$, $Y$, $Z$, $W$ and 67 covariates); per-fold standardization is `fit_rhc_transform` / `apply_rhc_transform`. To check the preprocessing:
 
-- `rhc_train.csv`, `rhc_val.csv`, `rhc_test.csv`
-- `RHC_X_allfeatures_list.csv`, `RHC_X_significantfeatures_list.csv`
+```bash
+python scripts/rhc_check_preprocessing.py
+```
+
+The old pre-split files (`rhc_train/val/test.csv` and related) have been removed; the legacy RHC entry points that read them no longer run.
 
 ## Experiment Workflow
 
