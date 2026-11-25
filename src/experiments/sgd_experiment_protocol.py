@@ -66,7 +66,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -379,6 +379,7 @@ def run_parametric_proximal_method(
     train_dataset: Any,
     test_dataset: Any,
     fold_plan: FoldPlan,
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     For each outer fold in `fold_plan` (the SAME plan NMMR uses): fit H/Q on
@@ -387,8 +388,13 @@ def run_parametric_proximal_method(
     folds with equal weight (same convention as NMMR's cross-fitting). A
     solver that does not converge is a method failure (raised here, caught
     by the caller) -- never silently accepted with a bad fit.
+
+    `model_kwargs` is passed to ProximalLinearModel (column names, q_form);
+    the default is the S1 layout. Column names are read from the fitted
+    model, so the same code serves any data set with A/Y columns.
     """
     from src.models.LINEAR.linear_model import ProximalLinearModel
+    model_kwargs = dict(model_kwargs or {})
 
     train_df = train_dataset.data
     test_df = test_dataset.data
@@ -400,9 +406,6 @@ def run_parametric_proximal_method(
     h1_oof = np.full(n_train, np.nan)
     q_observed_oof = np.full(n_train, np.nan)
 
-    test_W = test_df[['W']].values
-    test_Z = test_df[['Z']].values
-    test_X = test_df[['X1', 'X2']].values
     test_ones_a = np.ones(n_test)
     test_zeros_a = np.zeros(n_test)
     test_h0_per_fold: List[np.ndarray] = []
@@ -416,7 +419,8 @@ def run_parametric_proximal_method(
     for fold_id, (train_idx, eval_idx) in enumerate(fold_plan.splits, start=1):
         fold_train_df = train_df.iloc[train_idx]
         fold_eval_df = train_df.iloc[eval_idx]
-        model = ProximalLinearModel(fold_train_df)
+        model = ProximalLinearModel(fold_train_df, **model_kwargs)
+        test_W, test_Z, test_X = model.arrays(test_df)
 
         h_start = time.monotonic()
         b_hat, used_lstsq = model.solve_h()
@@ -430,9 +434,7 @@ def run_parametric_proximal_method(
                 f"Fold {fold_id}'s Q moment-equation solver did not converge: {q_message}"
             )
 
-        eval_W = fold_eval_df[['W']].values
-        eval_Z = fold_eval_df[['Z']].values
-        eval_X = fold_eval_df[['X1', 'X2']].values
+        eval_W, eval_Z, eval_X = model.arrays(fold_eval_df)
         eval_A = fold_eval_df['A'].values
         eval_ones_a = np.ones(len(eval_idx))
         eval_zeros_a = np.zeros(len(eval_idx))
