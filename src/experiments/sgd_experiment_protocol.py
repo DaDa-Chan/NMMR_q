@@ -56,9 +56,6 @@ required value (OOF/test predictions, POR/PIPW/PDR, bridge MSE, held-out
 moment risk), are finite -- NonFiniteResultError routes it to
 common/failures.csv instead, and that one method's failure does not stop
 the rest of the run.
-
-RHC's existing double_rob.py path is untouched and does not go through this
-module at all.
 """
 import hashlib
 import json

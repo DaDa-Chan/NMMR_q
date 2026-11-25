@@ -376,7 +376,3 @@ class NMMR_H_Trainer:
 
 class NMMR_H_Trainer_SGD(NMMR_H_Trainer):
     pass
-
-
-class NMMR_H_Trainer_RHC(NMMR_H_Trainer):
-    pass

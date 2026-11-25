@@ -144,8 +144,8 @@ def main():
         '--dataset_name', 
         type=str, 
         required=True,
-        choices=['sgd', 'rhc'],
-        help="要使用的数据集 (例如 'sgd' 或 'rhc')"
+        choices=['sgd'],
+        help="要使用的数据集（只支持 'sgd'）"
     )
     parser.add_argument(
         '--model_name', 

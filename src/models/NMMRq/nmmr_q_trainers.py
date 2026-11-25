@@ -465,6 +465,3 @@ class NMMR_Q_Trainer:
 class NMMR_Q_Trainer_SGD(NMMR_Q_Trainer):
     pass
         
-class NMMR_Q_Trainer_RHC(NMMR_Q_Trainer):
-
-    pass

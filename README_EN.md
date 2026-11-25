@@ -23,15 +23,15 @@ NMMR_q/
 │   │   └── LINEAR/               #   Linear baseline model
 │   ├── data/ate/                 #   Data generation and loading
 │   │   ├── sgd_pv.py             #     Synthetic data generation (true ATE = 2.0)
-│   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
+│   │   ├── data_class.py         #     SGDDataset
 │   │   └── rhc_protocol_data.py  #     RHC analysis frame (built from rhc_raw.csv)
 │   └── utils.py                  #   Utility functions
 ├── scripts/                      # HPO and focused experiment scripts
 │   ├── run_pilot_protocol.py     #   SGD pilot HPO entry point
-│   └── analyze_rhc_repeated.py   #   Focused RHC repeated-CF analysis
+│   └── rhc_check_preprocessing.py  # RHC preprocessing check (standard DR, POR)
 ├── configs/                      # JSON configuration files
 │   ├── sgd/                      #   SGD dataset configs (nmmr_q / nmmr_h)
-│   └── rhc/                      #   RHC dataset configs (nmmr_q / nmmr_h)
+│   └── sgd_frozen/               #   Manually promoted parameters for formal runs
 ├── data/                         # Input data
 │   ├── SGD/                      #   Synthetic data
 │   └── right_heart_catheterization/  # RHC observational data
@@ -84,7 +84,7 @@ Place the raw data `rhc_raw.csv` in `data/right_heart_catheterization/`. `src/da
 python scripts/rhc_check_preprocessing.py
 ```
 
-The old pre-split files (`rhc_train/val/test.csv` and related) have been removed; the legacy RHC entry points that read them no longer run.
+The old pre-split files (`rhc_train/val/test.csv` and related) and the legacy RHC entry points that read them (`double_rob.py --dataset_name rhc`, `RHCDataset`, `configs/rhc/`) have been removed; the new RHC cross-fitting entry point is being implemented.
 
 ## Experiment Workflow
 
@@ -113,15 +113,7 @@ The SGD protocol does not support resume: every run must use a new output direct
 an incomplete directory and restart the same command after an interruption. A failure of one
 method is still recorded without stopping the remaining methods and repetitions.
 
-The legacy RHC path remains available:
-
-```bash
-# RHC Bootstrap: resample with replacement for 95% CIs
-python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
-
-# RHC Repeated: eliminate fold-split noise
-python double_rob.py --dataset_name rhc --trials 100 --rhc_mode repeated
-```
+`double_rob.py` serves SGD only; the legacy RHC path has been removed.
 
 ### Formal Monte Carlo and reporting
 
@@ -164,15 +156,14 @@ SGD uses two config roles:
 - **FrozenConfig artifacts** under `configs/sgd_frozen/`: manually promoted, passed HPO
   candidates for standalone and the formal cross-fitting protocol.
 
-Legacy SGD `*_fixed.json` files are no longer supported. RHC legacy fixed configs remain
-temporarily for the not-yet-migrated RHC path.
+Legacy `*_fixed.json` files (SGD and RHC) have been removed and are no longer supported.
 
 | Config pattern | Dataset | Model | Loss |
 |----------------|---------|-------|------|
-| `nmmr_q_u_*.json` | SGD / RHC | NMMR-Q | U-statistic |
-| `nmmr_q_v_*.json` | SGD / RHC | NMMR-Q | V-statistic |
-| `nmmr_h_u_*.json` | SGD / RHC | NMMR-H | U-statistic |
-| `nmmr_h_v_*.json` | SGD / RHC | NMMR-H | V-statistic |
+| `nmmr_q_u_*.json` | SGD | NMMR-Q | U-statistic |
+| `nmmr_q_v_*.json` | SGD | NMMR-Q | V-statistic |
+| `nmmr_h_u_*.json` | SGD | NMMR-H | U-statistic |
+| `nmmr_h_v_*.json` | SGD | NMMR-H | V-statistic |
 
 ## TensorBoard
 

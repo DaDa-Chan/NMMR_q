@@ -107,7 +107,7 @@ def pilot_data_dir() -> Path:
 def frozen_config_dir() -> Path:
     """
     Where a user manually promotes a passed candidate to, alongside
-    configs/sgd and configs/rhc. No function in this module writes here; a
+    configs/sgd. No function in this module writes here; a
     human copies a candidate_config.json here after checking it passed.
     """
     return PROJECT_ROOT / "configs" / "sgd_frozen"

@@ -11,11 +11,11 @@ from sklearn.model_selection import KFold
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
-from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer,NMMR_Q_Trainer_SGD, NMMR_Q_Trainer_RHC, NMMR_Q_DualModel
+from src.models.NMMRq.nmmr_q_trainers import NMMR_Q_Trainer,NMMR_Q_Trainer_SGD, NMMR_Q_DualModel
 from src.models.NMMRq.nmmr_q_model import NMMR_Q_common
 from src.models.NMMRq.nmmr_q_loss import NMMR_Q_Loss
 from src.data.ate.sgd_pv import generate_data
-from src.data.ate.data_class import SGDDataset, RHCDataset, MergedDataset
+from src.data.ate.data_class import SGDDataset
 from src.models.experiment_common import (
     _locate_split_file,
     _parse_optuna_space,
@@ -45,13 +45,8 @@ def _create_trainer(data_configs, train_params, random_seed, dump_folder, data_n
             random_seed=random_seed,
             dump_folder=dump_folder,
         )
-    elif data_name == 'rhc' :
-        return NMMR_Q_Trainer_RHC(
-            data_configs=data_configs,
-            train_params=train_params,
-            random_seed=random_seed,
-            dump_folder=dump_folder,
-        )
+    raise ValueError(f"Unknown data_name: {data_name!r} (only 'sgd' is supported).")
+
 
 def _compute_unified_q_score(trainer,
                              model: torch.nn.Module,
@@ -801,35 +796,6 @@ def NMMR_Q_experiment(dataset_name: str,
                 tag="sgd_cf",
             )
 
-    elif dataset_key == 'rhc':
-        rhc_data_dir = data_configs.get('data_path')
-        use_all_x = data_configs.get('use_all_X', False)
-        trainer_data_configs = {'rhc': data_configs}
-        
-        print(f"加载 RHC 数据集 (use_all_X={use_all_x})...")
-        
-        train_dataset = RHCDataset(split='train', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        print("\n===> [RHC] 使用 config 中的固定参数")
-        final_train_params = base_params
-
-        print(f"\n===> [RHC] 加载 Val/Test 集并合并，准备执行 Cross Fitting")
-        val_dataset = RHCDataset(split='val', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        test_dataset = RHCDataset(split='test', use_all_x=use_all_x, data_dir=rhc_data_dir, device=device)
-        full_dataset = MergedDataset([train_dataset, val_dataset, test_dataset])
-
-        print(f"     全量数据样本数: {len(full_dataset)}")
-
-        set_random_seed(init_seed)
-        ate_estimate, ate_values, _, _, _ = _run_cross_fitting(
-            data_name=dataset_key,
-            dataset=full_dataset, # 在全量数据上进行 Cross Fitting
-            n_splits=n_splits,
-            train_params=final_train_params,
-            data_configs=trainer_data_configs,
-            random_seed=random_seed,
-            log_folder=log_folder,
-            tag="rhc_full_cf",
-        )
     else:
         raise ValueError(f"未知的数据集: {dataset_name}")
 
@@ -866,18 +832,6 @@ def train_q_standalone(data_configs, train_params, dataset_name, scenario, save_
         # 这里的 csv_path 为空，因为是实时生成的
         dataset = SGDDataset(csv_path='', df=df, device=device)
 
-    elif dataset_key == 'rhc':
-        # Deliberate scope limit: _run_cross_fitting's RHC population is the merged
-        # train+val+test set (see NMMR_Q_experiment's 'rhc' branch), while a
-        # single RHCDataset(split='train') here would be a smaller, different
-        # population -- not a valid horizontal comparison against
-        # cross-fitting. Revisit once RHC's standalone split is unified with
-        # cross-fitting's population.
-        raise NotImplementedError(
-            "train_q_standalone 目前只支持 dataset_name='sgd'。RHC 的 standalone 数据 "
-            "划分与 cross-fitting 使用的全量 RHC 数据(train+val+test 合并)不一致，"
-            "暂不提供可横向比较的 RHC standalone 流程。"
-        )
     else:
         raise ValueError(f"未知的 dataset_name: {dataset_name}")
 

@@ -24,16 +24,15 @@ NMMR_q/
 │   │   └── LINEAR/               #   线性基线模型
 │   ├── data/ate/                 #   数据生成与加载
 │   │   ├── sgd_pv.py             #     合成数据生成（真实 ATE = 2.0）
-│   │   ├── data_class.py         #     SGDDataset / RHCDataset / BootstrapDataset
+│   │   ├── data_class.py         #     SGDDataset
 │   │   └── rhc_protocol_data.py  #     RHC 分析数据（由 rhc_raw.csv 构造）
 │   └── utils.py                  #   工具函数
 ├── scripts/                      # HPO 与专项实验脚本
 │   ├── run_pilot_protocol.py     #   SGD HPO 主入口
-│   └── analyze_rhc_repeated.py   #   RHC repeated-CF 专项分析
+│   └── rhc_check_preprocessing.py  # RHC 预处理核对（标准 DR、POR）
 ├── configs/                      # JSON 配置文件
 │   ├── sgd/                      #   SGD 数据集配置（nmmr_q / nmmr_h）
-│   ├── sgd_frozen/               #   人工确认后供正式实验使用的参数产物
-│   └── rhc/                      #   RHC 数据集配置（nmmr_q / nmmr_h）
+│   └── sgd_frozen/               #   人工确认后供正式实验使用的参数产物
 ├── data/                         # 输入数据
 │   ├── pilot/                    #   按 DGP/scenario/seed/样本量保存的 HPO pilot 数据
 │   ├── SGD/                      #   合成数据
@@ -97,7 +96,7 @@ python src/data/ate/sgd_pv.py
 python scripts/rhc_check_preprocessing.py
 ```
 
-旧的离线切分文件（`rhc_train/val/test.csv` 等）已删除，依赖它们的旧 RHC 入口不再可用。
+旧的离线切分文件（`rhc_train/val/test.csv` 等）与读取它们的旧 RHC 入口（`double_rob.py --dataset_name rhc`、`RHCDataset`、`configs/rhc/`）已删除；新的 RHC 交叉拟合入口尚在实现中。
 
 ## 实验工作流
 
@@ -502,8 +501,8 @@ standalone 的职责保持精简（精简与config管理.md section 6.6）：只
 下已通过 confirm 的正式 FrozenConfig，不再支持旧的 `*_fixed.json`，也不在内部
 运行 Optuna。目前已接入 `oracle`、`parametric_proximal`、`nmmr_u`、
 `nmmr_v`、`ls`、`ls_qf` 和 `2sls`，且只启用 `S1`。LS、LS-QF、2SLS 自动展开
-为 `oracleP/cfP` 两个 variant；完整方法矩阵每个重复产生10行结果。RHC 旧流程
-未改动，继续沿用原有命令。
+为 `oracleP/cfP` 两个 variant；完整方法矩阵每个重复产生10行结果。
+`double_rob.py` 只服务 SGD；旧的 RHC 流程已删除。
 
 ```bash
 # SGD 全方法小规模联调（不是正式 P0）
@@ -512,12 +511,6 @@ python double_rob.py \
   --methods oracle,parametric_proximal,nmmr_u,nmmr_v,ls,ls_qf,2sls \
   --sample_sizes 300 --repetitions 1 --test_size 1000 --n_splits 5 \
   --base_seed 20261103 --output_dir results/p0_s1_smoke_v1
-
-# RHC Bootstrap：有放回抽样，构造 95% 置信区间
-python double_rob.py --dataset_name rhc --trials 100 --rhc_mode bootstrap
-
-# RHC Repeated：消除折划分噪声
-python double_rob.py --dataset_name rhc --trials 100 --rhc_mode repeated
 ```
 
 #### SGD P0/E1/E2 实验运行规则：不支持断点恢复
@@ -640,15 +633,14 @@ SGD 当前使用两类配置：
 - **搜索配置**（如 `nmmr_q_v_sgd.json`）：超参数用 dict 声明搜索范围，用于 HPO；`experiment.py --mode traditional` 的 `--config_path` 也可以复用这类文件，只取其中的 `data_configs`
 - **HPO candidate / FrozenConfig 产物**（如 `candidates/q_v_candidate_config.json`，人工确认通过后手动复制为 `configs/sgd_frozen/q_v_frozen_config.json`）：包含 HPO 选定参数、seed、selection provenance、`confirm_status` 和追溯哈希；standalone 与 `double_rob.py` 的 SGD 正式 cross-fitting protocol 都读取该格式。
 
-SGD 的旧 `*_fixed.json` 已删除，不再作为正式配置。RHC 的 legacy fixed 配置暂时
-保留，只服务尚未迁移的 RHC 旧流程。
+旧的 `*_fixed.json`（SGD 与 RHC）都已删除，不再作为正式配置。
 
 | 配置 | 数据集 | 模型 | 损失 |
 |------|--------|------|------|
-| `nmmr_q_u_*.json` | SGD / RHC | NMMR-Q | U 统计量 |
-| `nmmr_q_v_*.json` | SGD / RHC | NMMR-Q | V 统计量 |
-| `nmmr_h_u_*.json` | SGD / RHC | NMMR-H | U 统计量 |
-| `nmmr_h_v_*.json` | SGD / RHC | NMMR-H | V 统计量 |
+| `nmmr_q_u_*.json` | SGD | NMMR-Q | U 统计量 |
+| `nmmr_q_v_*.json` | SGD | NMMR-Q | V 统计量 |
+| `nmmr_h_u_*.json` | SGD | NMMR-H | U 统计量 |
+| `nmmr_h_v_*.json` | SGD | NMMR-H | V 统计量 |
 
 ## TensorBoard
 
