@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 
@@ -74,3 +76,69 @@ def diag_weighted_loss(residuals, kernel_matrix, diag_tau):
         off_term = torch.zeros((1, 1), device=kernel_matrix.device, dtype=kernel_matrix.dtype)
     diag_term = (residuals.squeeze(-1) ** 2 * k_diag).sum() / N
     return off_term + diag_tau * diag_term
+
+
+# ---------------------------------------------------------------------------
+# Kernel forms over blocks of kernel inputs (e.g. (A), (Z), (X) for h; (W), (X) for q)
+# ---------------------------------------------------------------------------
+#
+#   "joint"        : one Gaussian kernel on the concatenated inputs with one
+#                    median bandwidth. The trainers keep their original code
+#                    path for this form, so existing results are unchanged.
+#   "block_scaled" : each block is divided by sqrt(its dimension) before the
+#                    concatenation, then one Gaussian kernel with one median
+#                    bandwidth. The rescaling is fixed (it depends only on the
+#                    block dimensions), so this is still a single-bandwidth
+#                    Gaussian kernel on a fixed linear transform of the inputs.
+#                    It keeps a high-dimensional block (many covariates) from
+#                    swamping low-dimensional blocks (treatment, proxies).
+#   "product"      : product over blocks: exact matching 1{a = a'} on blocks
+#                    flagged exact (the binary treatment), and a Gaussian kernel
+#                    with its own median bandwidth on every other block.
+
+KERNEL_FORMS = ("joint", "block_scaled", "product")
+
+
+def resolve_kernel_form(train_params) -> str:
+    form = train_params.get("kernel_form", "joint")
+    if form not in KERNEL_FORMS:
+        raise ValueError(f"Unknown kernel_form {form!r}; expected one of {KERNEL_FORMS}.")
+    return form
+
+
+def _scaled_concat(blocks):
+    return torch.cat([b / math.sqrt(b.shape[1]) for b in blocks], dim=1)
+
+
+def fit_block_kernel(blocks, form: str, exact):
+    """
+    Bandwidths for a non-joint form, fitted once on training rows: one value
+    for "block_scaled", one per non-exact block (None for exact blocks) for
+    "product". Each is on the same scale as `fit_sigma` (the Gaussian
+    denominator 2 * median^2).
+    """
+    if form == "block_scaled":
+        return [fit_sigma(_scaled_concat(blocks))]
+    if form == "product":
+        return [None if ex else fit_sigma(b) for b, ex in zip(blocks, exact)]
+    raise ValueError(f"fit_block_kernel does not handle kernel_form={form!r}.")
+
+
+def block_kernel_matrix(blocks, form: str, sigmas, multiplier: float, exact):
+    """Kernel matrix [N, N] of a non-joint form; `multiplier` scales every bandwidth."""
+    n = blocks[0].shape[0]
+    if form == "block_scaled":
+        x = _scaled_concat(blocks)
+        return calculate_kernel_matrix_batched(dataset=x, batch_indices=(0, n), kernel=G_kernel,
+                                               sigma=sigmas[0] * multiplier, gamma=None)
+    if form == "product":
+        k = None
+        for b, s, ex in zip(blocks, sigmas, exact):
+            if ex:
+                part = (b.reshape(-1, 1) == b.reshape(1, -1)).to(b.dtype)
+            else:
+                part = calculate_kernel_matrix_batched(dataset=b, batch_indices=(0, n), kernel=G_kernel,
+                                                       sigma=s * multiplier, gamma=None)
+            k = part if k is None else k * part
+        return k
+    raise ValueError(f"block_kernel_matrix does not handle kernel_form={form!r}.")

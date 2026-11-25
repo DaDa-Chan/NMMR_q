@@ -15,7 +15,13 @@ from torch.cuda.amp import GradScaler, autocast
 
 from src.models.NMMRh.nmmr_h_loss import NMMR_H_Loss
 from src.models.NMMRh.nmmr_h_model import MLP_for_NMMR
-from src.models.kernel_utils import fit_sigma, G_kernel, calculate_kernel_matrix_batched
+from src.models.kernel_utils import (
+    fit_sigma, G_kernel, calculate_kernel_matrix_batched,
+    resolve_kernel_form, fit_block_kernel, block_kernel_matrix,
+)
+
+# Kernel blocks of h: (A), (Z), (X); A is matched exactly under kernel_form='product'.
+_H_EXACT_BLOCKS = (True, False, False)
 from src.models.experiment_common import (
     to_bool, check_loss_name_matches_u_statistic, check_diag_weight_config, resolve_diag_tau,
     resolve_checkpoint_criterion, TrainResult,
@@ -94,6 +100,10 @@ class NMMR_H_Trainer:
         # Fixed scoring bandwidth: median heuristic x 1, independent of the candidate's
         # kernel_bandwidth_multiplier, so held-out scores are comparable across candidates.
         self._reference_sigma: Optional[float] = None
+        # Kernel form (default "joint" = the original single Gaussian kernel on
+        # (A, Z, X)); other forms keep their own block bandwidths here.
+        self.kernel_form = resolve_kernel_form(train_params)
+        self._block_sigmas = None
         # PyTorch 2.2 exposes GradScaler under torch.cuda.amp; the
         # torch.amp.GradScaler entry point was added in a later release.
         self.scaler = GradScaler() if self.use_amp else None
@@ -144,6 +154,9 @@ class NMMR_H_Trainer:
                 "Kernel bandwidth has not been frozen yet; call _freeze_kernel_bandwidth "
                 "on the training subset before computing any kernel matrix."
             )
+        if self.kernel_form != "joint":
+            return block_kernel_matrix([batch_A, batch_Z, batch_X], self.kernel_form, self._block_sigmas,
+                                       self.kernel_bandwidth_multiplier, _H_EXACT_BLOCKS)
         k_matrix = calculate_kernel_matrix_batched(
             dataset=kernel_inputs, batch_indices=(0, N), kernel=G_kernel,
             sigma=self._frozen_sigma, gamma=None,
@@ -161,6 +174,9 @@ class NMMR_H_Trainer:
                 "Reference bandwidth has not been set yet; call _freeze_kernel_bandwidth "
                 "on the training subset before computing any scoring kernel."
             )
+        if self.kernel_form != "joint":
+            return block_kernel_matrix([batch_A, batch_Z, batch_X], self.kernel_form, self._block_sigmas,
+                                       1.0, _H_EXACT_BLOCKS)
         kernel_inputs = torch.cat((batch_A, batch_Z, batch_X), dim=1)
         return calculate_kernel_matrix_batched(
             dataset=kernel_inputs, batch_indices=(0, kernel_inputs.shape[0]), kernel=G_kernel,
@@ -177,6 +193,8 @@ class NMMR_H_Trainer:
         """
         kernel_inputs = torch.cat((A, Z, X), dim=1)
         base_sigma = fit_sigma(kernel_inputs)
+        if self.kernel_form != "joint":
+            self._block_sigmas = fit_block_kernel([A, Z, X], self.kernel_form, _H_EXACT_BLOCKS)
         self._reference_sigma = base_sigma
         self._frozen_sigma = base_sigma * self.kernel_bandwidth_multiplier
         return self._frozen_sigma
