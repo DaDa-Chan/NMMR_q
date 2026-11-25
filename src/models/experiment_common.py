@@ -470,7 +470,8 @@ def build_fold_record(
     return record
 
 
-def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def pick_simplest_within_one_se(candidates: List[Dict[str, Any]],
+                                bandwidth_key: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Generic one-standard-error selection rule over a plain list of candidate dicts
     (not tied to Optuna) each carrying at least: `value`, `fold_se`,
@@ -482,7 +483,9 @@ def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[
       3. Among candidates with `value` <= lambda_min["value"] + SE_min, pick
          the "simplest": shallower network -> narrower network -> stronger
          L2 (larger l2_penalty) -> shorter total training time as the final
-         tie-break.
+         tie-break. With `bandwidth_key` set (a searched kernel bandwidth
+         multiplier), a larger bandwidth (smoother kernel) is preferred right
+         after width; without it the order is unchanged.
 
     Returns (selected, best): `best` is the pure-minimum candidate, kept for audit.
     """
@@ -496,9 +499,11 @@ def pick_simplest_within_one_se(candidates: List[Dict[str, Any]]) -> Tuple[Dict[
     within_band = [c for c in candidates if c["value"] <= threshold]
 
     def simplicity_key(c):
+        bandwidth = (-(c.get(bandwidth_key, 0.0) or 0.0),) if bandwidth_key else ()
         return (
             c.get("network_depth", float("inf")),
             c.get("network_width", float("inf")),
+            *bandwidth,  # larger bandwidth (smoother kernel) sorts first
             -(c.get("l2_penalty", 0.0) or 0.0),  # larger l2_penalty (stronger) sorts first
             c.get("total_train_seconds", float("inf")),
         )

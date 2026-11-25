@@ -5,12 +5,15 @@ fixed candidate pool, by held-out U moment risk.
 Design (all choices fixed before any RHC fit):
 
 * Candidate pool: ``POOL_SIZE`` points from a Latin hypercube with a fixed
-  seed over (depth, width, log learning rate, log L2). The pool never depends
-  on data, so a data-dependent choice among its members is a choice among a
-  fixed finite set.
-* Tuning tasks: H-V, Q-V, H-U, Q-U. Everything except the four searched
-  coordinates (batch size, bandwidth multiplier, training objective, epochs,
-  patience, scheduler) is taken from the matching S1 frozen config.
+  seed over (depth, width, log learning rate, log L2, bandwidth multiplier).
+  The pool never depends on data, so a data-dependent choice among its
+  members is a choice among a fixed finite set. The earlier four-coordinate
+  pool (multiplier taken from S1) is kept as version "v1" so its file still
+  verifies; the default is "v2".
+* Tuning tasks: H-V, Q-V, H-U, Q-U. Everything except the searched
+  coordinates (batch size, training objective, epochs, patience, scheduler,
+  and the multiplier for a v1 pool) is taken from the matching S1 frozen
+  config.
   NMMR-RW borrows the V configuration and NMMR-U+clip the U configuration
   (stage 1), so they are not tuned here.
 * Inner split: ``nested_hpo_fold_split`` (3 folds stratified by A, 10% of
@@ -22,7 +25,8 @@ Design (all choices fixed before any RHC fit):
 * Re-evaluation: the top ``TOP_K`` with ``N_REEVAL_SEEDS`` new seeds on the
   same inner folds; final score and its standard error from these units.
 * Selection: ``pick_simplest_within_one_se`` (one-SE rule, simplest =
-  shallower, narrower, stronger L2, shorter training), as in S1.
+  shallower, narrower, larger bandwidth multiplier (smoother kernel),
+  stronger L2, shorter training).
 
 The same ``run_tuning_task`` serves stage 0 (the whole sample) and the
 strict nested sensitivity analysis (an outer training fold, passed as a
@@ -60,7 +64,7 @@ from src.utils import empty_device_cache, get_device, make_seed_bundle, set_rand
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 S1_FROZEN_DIR = PROJECT_ROOT / "configs" / "sgd_frozen"
-DEFAULT_POOL_PATH = PROJECT_ROOT / "configs" / "rhc" / "candidate_pool.json"
+DEFAULT_POOL_PATH = PROJECT_ROOT / "configs" / "rhc" / "candidate_pool_v2.json"
 
 TUNING_TASKS: Tuple[str, ...] = ("H-V", "Q-V", "H-U", "Q-U")
 S1_FROZEN_FILES: Dict[str, str] = {
@@ -68,12 +72,23 @@ S1_FROZEN_FILES: Dict[str, str] = {
     "H-U": "h_u_frozen_config.json", "Q-U": "q_u_frozen_config.json",
 }
 
-POOL_SIZE = 20
-POOL_SEED = 20261125
 DEPTHS: Tuple[int, ...] = (2, 3, 4)
 WIDTHS: Tuple[int, ...] = (32, 64, 128)
 LR_RANGE: Tuple[float, float] = (1e-4, 5e-3)
 L2_RANGE: Tuple[float, float] = (1e-7, 1e-3)
+MULTIPLIERS: Tuple[float, ...] = (0.25, 0.5, 1.0, 2.0)
+
+# v1: the first stage-0 pool (multiplier from S1). v2: multiplier searched,
+# added after R10 because the S1 multipliers were tuned under the joint kernel.
+POOL_VERSIONS: Dict[str, Dict[str, Any]] = {
+    "v1": {"pool_size": 20, "pool_seed": 20261125, "multipliers": None},
+    "v2": {"pool_size": 30, "pool_seed": 20261126, "multipliers": MULTIPLIERS},
+}
+DEFAULT_POOL_VERSION = "v2"
+POOL_SIZE = POOL_VERSIONS[DEFAULT_POOL_VERSION]["pool_size"]
+POOL_SEED = POOL_VERSIONS[DEFAULT_POOL_VERSION]["pool_seed"]
+SEARCHED_KEYS: Tuple[str, ...] = ("network_depth", "network_width", "learning_rate", "l2_penalty",
+                                  "kernel_bandwidth_multiplier")
 
 N_INNER_FOLDS = 3
 EARLYSTOP_FRACTION = 0.1
@@ -90,18 +105,21 @@ UNIT_COLUMNS: List[str] = [
 # Candidate pool
 # ---------------------------------------------------------------------------
 
-def make_candidate_pool(n: int = POOL_SIZE, seed: int = POOL_SEED) -> List[Dict[str, Any]]:
+def make_candidate_pool(n: int = POOL_SIZE, seed: int = POOL_SEED,
+                        multipliers: Optional[Sequence[float]] = MULTIPLIERS) -> List[Dict[str, Any]]:
     """
-    Latin hypercube over [0,1)^4, mapped to depth and width (each coordinate
-    cut into equal thirds) and to log-uniform learning rate and L2. Depends
-    only on (n, seed).
+    Latin hypercube over [0,1)^d, mapped to depth and width (each coordinate
+    cut into equal thirds), log-uniform learning rate and L2, and, when
+    ``multipliers`` is given, a fifth coordinate cut into equal parts over
+    the multiplier levels (d = 5). ``multipliers=None`` reproduces the v1
+    four-coordinate pool exactly. Depends only on the arguments.
     """
     from scipy.stats import qmc
 
-    u = qmc.LatinHypercube(d=4, seed=seed).random(n)
+    u = qmc.LatinHypercube(d=4 if multipliers is None else 5, seed=seed).random(n)
 
-    def discrete(col: np.ndarray, levels: Sequence[int]) -> List[int]:
-        return [int(levels[min(int(v * len(levels)), len(levels) - 1)]) for v in col]
+    def discrete(col: np.ndarray, levels: Sequence[Any], cast=int) -> List[Any]:
+        return [cast(levels[min(int(v * len(levels)), len(levels) - 1)]) for v in col]
 
     def log_uniform(col: np.ndarray, lo: float, hi: float) -> List[float]:
         return [float(math.exp(math.log(lo) + v * (math.log(hi) - math.log(lo)))) for v in col]
@@ -110,27 +128,37 @@ def make_candidate_pool(n: int = POOL_SIZE, seed: int = POOL_SEED) -> List[Dict[
     width = discrete(u[:, 1], WIDTHS)
     lr = log_uniform(u[:, 2], *LR_RANGE)
     l2 = log_uniform(u[:, 3], *L2_RANGE)
-    return [
+    pool = [
         {"candidate_id": i, "network_depth": depth[i], "network_width": width[i],
          "learning_rate": lr[i], "l2_penalty": l2[i]}
         for i in range(n)
     ]
+    if multipliers is not None:
+        for c, m in zip(pool, discrete(u[:, 4], multipliers, cast=float)):
+            c["kernel_bandwidth_multiplier"] = m
+    return pool
 
 
-def pool_payload(pool: List[Dict[str, Any]], n: int = POOL_SIZE, seed: int = POOL_SEED) -> Dict[str, Any]:
+def pool_payload(pool: List[Dict[str, Any]], n: int = POOL_SIZE, seed: int = POOL_SEED,
+                 multipliers: Optional[Sequence[float]] = MULTIPLIERS) -> Dict[str, Any]:
+    space: Dict[str, Any] = {"network_depth": list(DEPTHS), "network_width": list(WIDTHS),
+                             "learning_rate_log_uniform": list(LR_RANGE), "l2_penalty_log_uniform": list(L2_RANGE)}
+    if multipliers is not None:
+        space["kernel_bandwidth_multiplier"] = list(multipliers)
     return {
         "generator": "scipy.stats.qmc.LatinHypercube",
         "pool_size": n, "pool_seed": seed,
-        "search_space": {"network_depth": list(DEPTHS), "network_width": list(WIDTHS),
-                         "learning_rate_log_uniform": list(LR_RANGE), "l2_penalty_log_uniform": list(L2_RANGE)},
+        "search_space": space,
         "candidates": pool,
     }
 
 
-def save_candidate_pool(path: Path = DEFAULT_POOL_PATH) -> str:
+def save_candidate_pool(path: Path = DEFAULT_POOL_PATH, version: str = DEFAULT_POOL_VERSION) -> str:
     """Write the pool file (refuses to overwrite a different one); returns its SHA-256."""
     path = Path(path)
-    text = json.dumps(pool_payload(make_candidate_pool()), indent=2) + "\n"
+    spec = POOL_VERSIONS[version]
+    n, seed, mult = spec["pool_size"], spec["pool_seed"], spec["multipliers"]
+    text = json.dumps(pool_payload(make_candidate_pool(n, seed, mult), n, seed, mult), indent=2) + "\n"
     if path.exists() and path.read_text() != text:
         raise FileExistsError(f"{path} exists with different content; refusing to overwrite.")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +171,8 @@ def load_candidate_pool(path: Path = DEFAULT_POOL_PATH) -> Tuple[List[Dict[str, 
     path = Path(path)
     text = path.read_text()
     payload = json.loads(text)
-    expected = make_candidate_pool(payload["pool_size"], payload["pool_seed"])
+    mult = payload["search_space"].get("kernel_bandwidth_multiplier")
+    expected = make_candidate_pool(payload["pool_size"], payload["pool_seed"], mult)
     if payload["candidates"] != expected:
         raise ValueError(f"{path}: candidates differ from the fixed generator's output.")
     return payload["candidates"], hashlib.sha256(text.encode()).hexdigest()
@@ -154,7 +183,7 @@ def load_candidate_pool(path: Path = DEFAULT_POOL_PATH) -> Tuple[List[Dict[str, 
 # ---------------------------------------------------------------------------
 
 def s1_base_train_params(task: str, frozen_dir: Path = S1_FROZEN_DIR) -> Dict[str, Any]:
-    """Everything except the four searched coordinates, from the S1 frozen config."""
+    """Everything except the searched coordinates, from the S1 frozen config."""
     if task not in TUNING_TASKS:
         raise ValueError(f"Unknown tuning task {task!r}; expected one of {TUNING_TASKS}.")
     frozen = FrozenConfig.load(Path(frozen_dir) / S1_FROZEN_FILES[task])
@@ -165,8 +194,9 @@ def s1_base_train_params(task: str, frozen_dir: Path = S1_FROZEN_DIR) -> Dict[st
 
 def candidate_train_params(base: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     params = dict(base)
-    for key in ("network_depth", "network_width", "learning_rate", "l2_penalty"):
-        params[key] = candidate[key]
+    for key in SEARCHED_KEYS:
+        if key in candidate:
+            params[key] = candidate[key]
     return params
 
 
@@ -250,7 +280,7 @@ def summarize_candidate(units: pd.DataFrame, candidate: Dict[str, Any]) -> Dict[
     `value`/`fold_se` keys `pick_simplest_within_one_se` reads). Any failed
     unit makes the candidate's value +inf, as in S1.
     """
-    out = {k: candidate[k] for k in ("candidate_id", "network_depth", "network_width", "learning_rate", "l2_penalty")}
+    out = {k: candidate[k] for k in ("candidate_id", *SEARCHED_KEYS) if k in candidate}
     out["n_units"] = int(len(units))
     out["total_train_seconds"] = float(np.nansum(units["train_seconds"].to_numpy(dtype=float)))
     failed = units["failure_reason"].notna() & (units["failure_reason"].astype(str) != "")
@@ -317,6 +347,9 @@ def run_tuning_task(task: str, frame: pd.DataFrame, out_dir: Path, base_seed: in
         "n_inner_folds": N_INNER_FOLDS, "earlystop_fraction": EARLYSTOP_FRACTION,
         "top_k": TOP_K, "n_reeval_seeds": N_REEVAL_SEEDS, "ranking": "held-out U moment risk (reference kernel)",
         "selection": "pick_simplest_within_one_se over re-evaluation scores",
+        "simplicity_order": (["depth", "width", "larger multiplier", "larger l2", "time"]
+                             if any("kernel_bandwidth_multiplier" in c for c in pool)
+                             else ["depth", "width", "larger l2", "time"]),
     }
     config_path = out_dir / "run_config.json"
     if config_path.exists():
@@ -373,7 +406,9 @@ def run_tuning_task(task: str, frame: pd.DataFrame, out_dir: Path, base_seed: in
     valid = [c for c in finalists if math.isfinite(c["value"])]
     if not valid:
         raise RuntimeError(f"{task}: every finalist failed in re-evaluation.")
-    selected, pure_min = pick_simplest_within_one_se(valid)
+    searched_multiplier = any("kernel_bandwidth_multiplier" in c for c in pool)
+    selected, pure_min = pick_simplest_within_one_se(
+        valid, bandwidth_key="kernel_bandwidth_multiplier" if searched_multiplier else None)
 
     payload = {
         "task": task, "selected_candidate_id": int(selected["candidate_id"]),

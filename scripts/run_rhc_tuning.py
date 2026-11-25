@@ -2,10 +2,14 @@
 Stage 0 of the RHC analysis: tune H-V, Q-V, H-U, Q-U on a fixed candidate pool.
 
     # write (or check) the candidate pool file, once, before any tuning
+    # (default: v2 pool, 30 candidates, bandwidth multiplier searched)
     python scripts/run_rhc_tuning.py --write_pool
 
     # main analysis: tune on the whole sample
-    python scripts/run_rhc_tuning.py --out_dir results/rhc_tuning --base_seed 20261126
+    python scripts/run_rhc_tuning.py --out_dir results/rhc_tuning_v2 --base_seed 20261126 --kernel_form product
+
+    # the earlier v1 pool (20 candidates, multiplier from S1) stays verifiable:
+    python scripts/run_rhc_tuning.py --write_pool --pool configs/rhc/candidate_pool.json --pool_version v1
 
     # strict nested sensitivity: tune inside one outer training fold of a
     # stage-1 repetition (its evaluation rows are never seen)
@@ -32,6 +36,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--write_pool", action="store_true", help="write/check the candidate pool file and exit")
     p.add_argument("--pool", type=Path, default=T.DEFAULT_POOL_PATH)
+    p.add_argument("--pool_version", default=T.DEFAULT_POOL_VERSION, choices=sorted(T.POOL_VERSIONS),
+                   help="which fixed pool --write_pool writes/checks")
     p.add_argument("--out_dir", type=Path)
     p.add_argument("--base_seed", type=int)
     p.add_argument("--tasks", default=",".join(T.TUNING_TASKS))
@@ -44,7 +50,7 @@ def main() -> None:
     args = p.parse_args()
 
     if args.write_pool:
-        print(f"{args.pool}: sha256={T.save_candidate_pool(args.pool)}")
+        print(f"{args.pool}: sha256={T.save_candidate_pool(args.pool, args.pool_version)}")
         return
     if args.out_dir is None or args.base_seed is None:
         p.error("--out_dir and --base_seed are required")
