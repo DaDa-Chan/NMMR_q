@@ -1,0 +1,79 @@
+{
+  "task": "Q-V",
+  "selected_candidate_id": 18,
+  "pure_min_candidate_id": 18,
+  "train_params": {
+    "model_name": "nmmr_q",
+    "loss_name": "V_statistic",
+    "use_u_statistic": false,
+    "n_epochs": 300,
+    "batch_size": 64,
+    "patience": 30,
+    "scheduler_patience": 10,
+    "scheduler_factor": 0.5,
+    "scheduler_min_lr": 1e-06,
+    "early_stopping_min_delta": 5e-05,
+    "n_splits": 5,
+    "network_depth": 2,
+    "network_width": 64,
+    "learning_rate": 0.0011573158374646162,
+    "l2_penalty": 3.917612269455182e-07,
+    "kernel_bandwidth_multiplier": 2.0,
+    "log_metrics": false,
+    "kernel_form": "product"
+  },
+  "selected_score_u": 0.0019689456756821293,
+  "selected_se": 0.00013828382407635937,
+  "pure_min_score_u": 0.0019689456756821293,
+  "pure_min_se": 0.00013828382407635937,
+  "run_config": {
+    "task": "Q-V",
+    "base_seed": 20261126,
+    "seeds": {
+      "split_seed": 2625213100,
+      "screen_seed": 2994631890,
+      "reeval_seeds": [
+        1361908073,
+        3025700809,
+        2434574706
+      ]
+    },
+    "pool_sha256": "91b7cd75daf687a297e03f1728e310ed6ae57acccf0b1c4f826779ed732aca4c",
+    "n_rows": 5735,
+    "frame_sha256": "3c99a024b2887f1f1c86e411126ebf1ce0929e3ecf211f1cee59838ed07fa74d",
+    "base_train_params": {
+      "model_name": "nmmr_q",
+      "loss_name": "V_statistic",
+      "use_u_statistic": false,
+      "n_epochs": 300,
+      "batch_size": 64,
+      "patience": 30,
+      "scheduler_patience": 10,
+      "scheduler_factor": 0.5,
+      "scheduler_min_lr": 1e-06,
+      "early_stopping_min_delta": 5e-05,
+      "n_splits": 5,
+      "network_depth": 5,
+      "network_width": 32,
+      "learning_rate": 0.004983851135156308,
+      "l2_penalty": 2.4638728712727066e-05,
+      "kernel_bandwidth_multiplier": 0.5,
+      "log_metrics": false,
+      "kernel_form": "product"
+    },
+    "n_inner_folds": 3,
+    "earlystop_fraction": 0.1,
+    "top_k": 3,
+    "n_reeval_seeds": 3,
+    "ranking": "held-out U moment risk (reference kernel)",
+    "selection": "pick_simplest_within_one_se over re-evaluation scores",
+    "simplicity_order": [
+      "depth",
+      "width",
+      "larger multiplier",
+      "larger l2",
+      "time"
+    ]
+  },
+  "git_commit": "e602179743e57da4616081e0656660144c20c1b2"
+}

@@ -1,0 +1,74 @@
+{
+  "base_seed": 20261201,
+  "frozen_config_hashes": {
+    "H-U": "a1a0e9b40998202b73fac43ececcceae169a7941f03da1510d8dcf6b33cca490",
+    "H-V": "45295cc0da3f8af821be0774fc15c2d199e8f337fb8e9525dc26867d14c75cda",
+    "Q-U": "b46dbdf83ce0f83e489e2ad7a682105b2c38e227cafb686b6171a7f300193ae6",
+    "Q-V": "a2a6f9591e6e7cb0e3fc1408e29a2e292725e6b9556a24746259d330dc9d7c3a"
+  },
+  "methods": [
+    "oracle",
+    "parametric_proximal",
+    "nmmr_c",
+    "nmmr_v",
+    "nmmr_u",
+    "nmmr_u_clip"
+  ],
+  "n_splits": 5,
+  "nmmr_settings": {
+    "checkpoint_criterion": "u_statistic (trainer default; see resolve_checkpoint_criterion)",
+    "clipped_methods": [
+      "nmmr_c",
+      "nmmr_u_clip"
+    ],
+    "frozen_config_ids": {
+      "nmmr_c": [
+        "H-V",
+        "Q-V"
+      ],
+      "nmmr_u": [
+        "H-U",
+        "Q-U"
+      ],
+      "nmmr_u_clip": [
+        "H-U",
+        "Q-U"
+      ],
+      "nmmr_v": [
+        "H-V",
+        "Q-V"
+      ]
+    },
+    "nmmr_c_overrides": "diag_weight_rule=corrected (tau = 1/(n_train-1)), loss_name=diag_corrected, plus output clipping",
+    "output_clip_rule": "B_q = 10*log(n)/log(500), B_h = 20*sqrt(log(n)/log(500)), n = repetition training size"
+  },
+  "prediction_persistence": {
+    "common_inputs_path_template": "common/prediction_inputs/{scenario}_n{n}_rep{repetition:04d}.npz",
+    "format": "numpy.savez_compressed",
+    "h_moment_features": [
+      "1",
+      "Z",
+      "A",
+      "X1",
+      "X2"
+    ],
+    "predictions_path_template_no_variant": "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}.npz",
+    "predictions_path_template_with_variant": "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}__{variant}.npz",
+    "q_moment_features_per_treatment_level": [
+      "1",
+      "W",
+      "X1",
+      "X2"
+    ]
+  },
+  "repetitions": 100,
+  "run_stage": "E2",
+  "sample_sizes": [
+    10000
+  ],
+  "scenarios": [
+    "S1"
+  ],
+  "software_version": "90f82322a603b4124d4f5fba6179c550eb3fe712",
+  "test_size": 20000
+}

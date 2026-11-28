@@ -1,0 +1,140 @@
+{
+  "2sls_settings": {
+    "cfP_max_iter": 1000,
+    "cfP_penalty": null,
+    "cfP_solver": "lbfgs",
+    "h_endogenous": "W",
+    "h_exogenous": [
+      "A",
+      "X1",
+      "X2"
+    ],
+    "h_instrument": "Z",
+    "propensity_clipping": null,
+    "q_endogenous": "Z",
+    "q_exogenous": [
+      "A",
+      "X1",
+      "X2"
+    ],
+    "q_instrument": "W",
+    "variants": [
+      "oracleP",
+      "cfP"
+    ]
+  },
+  "base_seed": 20261201,
+  "frozen_config_hashes": {
+    "H-V": "45295cc0da3f8af821be0774fc15c2d199e8f337fb8e9525dc26867d14c75cda",
+    "Q-V": "a2a6f9591e6e7cb0e3fc1408e29a2e292725e6b9556a24746259d330dc9d7c3a"
+  },
+  "ls_qf_settings": {
+    "cfP_max_iter": 1000,
+    "cfP_penalty": null,
+    "cfP_solver": "lbfgs",
+    "h_feature_names": [
+      "1",
+      "W",
+      "A",
+      "X1",
+      "X2",
+      "W^2",
+      "X1^2",
+      "X2^2",
+      "W*A",
+      "W*X1",
+      "W*X2",
+      "A*X1",
+      "A*X2",
+      "X1*X2"
+    ],
+    "propensity_clipping": null,
+    "q_feature_names": [
+      "1",
+      "Z",
+      "A",
+      "X1",
+      "X2",
+      "Z^2",
+      "X1^2",
+      "X2^2",
+      "Z*A",
+      "Z*X1",
+      "Z*X2",
+      "A*X1",
+      "A*X2",
+      "X1*X2"
+    ],
+    "variants": [
+      "oracleP",
+      "cfP"
+    ]
+  },
+  "ls_settings": {
+    "cfP_max_iter": 1000,
+    "cfP_penalty": null,
+    "cfP_solver": "lbfgs",
+    "propensity_clipping": null,
+    "variants": [
+      "oracleP",
+      "cfP"
+    ]
+  },
+  "methods": [
+    "oracle",
+    "parametric_proximal",
+    "ls",
+    "ls_qf",
+    "2sls",
+    "nmmr_c",
+    "nmmr_v"
+  ],
+  "n_splits": 5,
+  "nmmr_settings": {
+    "checkpoint_criterion": "u_statistic (trainer default; see resolve_checkpoint_criterion)",
+    "clipped_methods": [
+      "nmmr_c"
+    ],
+    "frozen_config_ids": {
+      "nmmr_c": [
+        "H-V",
+        "Q-V"
+      ],
+      "nmmr_v": [
+        "H-V",
+        "Q-V"
+      ]
+    },
+    "nmmr_c_overrides": "diag_weight_rule=corrected (tau = 1/(n_train-1)), loss_name=diag_corrected, plus output clipping",
+    "output_clip_rule": "B_q = 10*log(n)/log(500), B_h = 20*sqrt(log(n)/log(500)), n = repetition training size"
+  },
+  "prediction_persistence": {
+    "common_inputs_path_template": "common/prediction_inputs/{scenario}_n{n}_rep{repetition:04d}.npz",
+    "format": "numpy.savez_compressed",
+    "h_moment_features": [
+      "1",
+      "Z",
+      "A",
+      "X1",
+      "X2"
+    ],
+    "predictions_path_template_no_variant": "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}.npz",
+    "predictions_path_template_with_variant": "predictions/{scenario}/n{n}/rep{repetition:04d}/{method}__{variant}.npz",
+    "q_moment_features_per_treatment_level": [
+      "1",
+      "W",
+      "X1",
+      "X2"
+    ]
+  },
+  "repetitions": 500,
+  "run_stage": "E2",
+  "sample_sizes": [
+    2000
+  ],
+  "scenarios": [
+    "S1"
+  ],
+  "software_version": "90f82322a603b4124d4f5fba6179c550eb3fe712",
+  "test_size": 20000
+}
